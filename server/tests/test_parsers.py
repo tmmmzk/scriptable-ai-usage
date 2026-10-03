@@ -15,7 +15,11 @@ class ClaudeParserTest(unittest.TestCase):
             "seven_day": {"utilization": 18, "resets_at": "2026-10-08T00:00:00Z"},
             "seven_day_opus": None,
             "seven_day_sonnet": {"utilization": 5, "resets_at": None},
-            "seven_day_cowork": {"utilization": 1, "resets_at": "2026-10-08T00:00:00Z"},
+            "iguana_necktie": {"utilization": 1, "resets_at": "2026-10-08T00:00:00Z"},
+            "limits": [
+                {"kind": "weekly_scoped", "scope": {"model": {"display_name": "Fable"}}, "percent": 33, "resets_at": 1790000000},
+                {"kind": "other", "scope": {"model": {"display_name": "X"}}, "percent": 1},
+            ],
             "extra_usage": {"is_enabled": True, "used_credits": 120, "monthly_limit": 5000, "utilization": 2.4},
         }
         w = {x["key"]: x for x in claude.parse_windows(data)}
@@ -25,8 +29,21 @@ class ClaudeParserTest(unittest.TestCase):
         self.assertTrue(w["session"]["primary"] and w["weekly"]["primary"])
         self.assertNotIn("weekly_opus", w)
         self.assertIn("weekly_sonnet", w)
-        self.assertIn("seven_day_cowork", w)
+        self.assertNotIn("iguana_necktie", w)  # 내부 코드네임 블록은 숨김
+        self.assertEqual(w["session"]["label"], "현재 세션")
+        self.assertEqual(w["weekly"]["label"], "이번 주")
+        self.assertEqual(w["model:Fable"]["label"], "Fable 이번 주")
+        self.assertEqual(w["model:Fable"]["used_percent"], 33)
+        self.assertNotIn("model:X", w)
         self.assertEqual(claude.parse_extra_usage(data)["extra_usage"]["used_percent"], 2.4)
+
+    def test_plan(self):
+        self.assertEqual(claude.parse_plan({"organization": {"organization_type": "claude_max",
+                                                             "rate_limit_tier": "default_claude_max_20x"}}), "default_claude_max_20x")
+        self.assertEqual(claude.parse_plan({"organization": {"organization_type": "claude_pro"}}), "pro")
+        self.assertEqual(claude.parse_plan({"organization": {"organization_type": "claude_team"}}), "team")
+        self.assertIsNone(claude.parse_plan({}))
+        self.assertIsNone(claude.parse_plan(None))
 
     def test_reset_credits(self):
         block = {

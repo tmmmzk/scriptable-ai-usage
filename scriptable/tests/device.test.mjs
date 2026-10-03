@@ -16,6 +16,12 @@ const FileManager = { local: () => ({ joinPath: (a, b) => `${a}/${b}`, documents
 const UUID = { string: () => crypto.randomUUID().toUpperCase() }
 class Color { constructor(h, a) { this.hex = h; this.a = a } static dynamic(l) { return l } static white() { return new Color("#fff") } static red() { return new Color("#f00") } static gray() { return new Color("#888") } }
 const Font = new Proxy({}, { get: () => () => ({}) })
+const notifications = []
+class Notification {
+  setTriggerDate(d) { this.at = d }
+  async schedule() { notifications.push({ id: this.identifier, title: this.title, body: this.body, at: this.at }) }
+}
+const URLScheme = { forRunningScript: () => "scriptable:///run/AIUsage" }
 
 // ── 가짜 업스트림 ──
 const calls = []
@@ -42,11 +48,16 @@ function upstream(method, url, headers, raw) {
     assert.equal(b.refresh_token, `c-rt-${up.claudeRefreshes}`)
     return ok({ access_token: `c-at-${up.claudeRefreshes + 1}`, refresh_token: `c-rt-${up.claudeRefreshes + 1}`, expires_in: 28800 })
   }
+  if (url === "https://api.anthropic.com/api/oauth/profile")
+    return ok({ organization: { organization_type: "claude_max", rate_limit_tier: "default_claude_max_20x" } })
   if (url === "https://api.anthropic.com/api/oauth/usage") {
     assert.equal(headers["anthropic-beta"], "oauth-2025-04-20")
     if (up.claudeUsageStatus !== 200) { const s = up.claudeUsageStatus; up.claudeUsageStatus = 200; return ok({}, s) }
     return ok({ five_hour: { utilization: 10, resets_at: "2099-01-01T05:00:00.123456+00:00" },
-      seven_day: { utilization: 20, resets_at: "2099-01-07T00:00:00Z" }, extra_usage: { is_enabled: true, used_credits: 5, monthly_limit: 50, utilization: 10 } })
+      seven_day: { utilization: 20, resets_at: "2099-01-07T00:00:00Z" }, extra_usage: { is_enabled: true, used_credits: 5, monthly_limit: 50, utilization: 10 },
+      iguana_necktie: { utilization: 3, resets_at: "2099-01-07T00:00:00Z" }, // 내부 코드네임 블록
+      limits: [{ kind: "weekly_scoped", scope: { model: { display_name: "Fable" } }, percent: 33, resets_at: 4070908800 },
+        { kind: "something_else", percent: 1 }] })
   }
   if (url === "https://claude.ai/api/organizations") return ok([{ uuid: "org-api", capabilities: ["api"] }, { uuid: "org-1", capabilities: ["chat"] }])
   if (u.host === "claude.ai" && u.pathname === "/api/organizations/org-1/usage") {
@@ -101,10 +112,11 @@ class Request {
   }
 }
 
-const env = { Keychain, FileManager, UUID, Color, Font, Request, Device: { screenSize: () => ({ width: 393, height: 852 }) } }
+const env = { Keychain, FileManager, UUID, Color, Font, Request, Notification, URLScheme, Device: { screenSize: () => ({ width: 393, height: 852 }) } }
 const api = new Function(...Object.keys(env), body + `
   return { sha256, b64url, b64decode, utf8Bytes, utf8Decode, jwtClaims, pkcePair, parseCallbackInput, deviceApi,
-    devGetCreds, devCredKey, getConfig, setMode, KC_AG_CLIENT, msOf, devRefreshCreds, claudeProvider }`)(...Object.values(env))
+    devGetCreds, devCredKey, getConfig, setMode, KC_AG_CLIENT, msOf, devRefreshCreds, claudeProvider,
+    checkAlerts, saveNotifySettings, planLabel, resetText }`)(...Object.values(env))
 
 let passed = 0
 const test = async (name, fn) => { await fn(); passed++; console.log("ok -", name) }
@@ -158,10 +170,14 @@ await test("Claude OAuth 로그인(PKCE 검증) → 사용량", async () => {
   claudeId = acc.id
   assert.equal(acc.label, "개인")
   assert.equal(acc.email, "me@example.com")
+  assert.equal(acc.plan, "default_claude_max_20x") // 프로필로 조회한 플랜
   assert.equal(acc.status, "ok")
   const { accounts } = await call("GET", "/v1/usage")
   const e = accounts[0]
-  assert.deepEqual(e.windows.map((w) => [w.key, w.used_percent]), [["session", 10], ["weekly", 20]])
+  // 알려진 키 + limits[] 의 모델별 주간 한도만. iguana_necktie 같은 코드네임은 숨김.
+  assert.deepEqual(e.windows.map((w) => [w.key, w.label, w.used_percent]),
+    [["session", "현재 세션", 10], ["weekly", "이번 주", 20], ["model:Fable", "Fable 이번 주", 33]])
+  assert.equal(e.windows[2].resets_at, "2099-01-01T00:00:00Z")
   assert.equal(e.windows[0].resets_at, "2099-01-01T05:00:00Z")
   assert.equal(e.extra.extra_usage.used_percent, 10)
   assert.equal(e.reset_credits, null)
@@ -276,6 +292,49 @@ await test("숨김·이름 변경·삭제(키체인·파일 정리)", async () =
   assert.ok(!(api.devCredKey(codexId) in kc))
   assert.ok(!Object.keys(files).some((f) => f.includes(codexId)))
   await assert.rejects(call("GET", `/v1/accounts/${codexId}`))
+})
+
+await test("플랜 표시: Codex Team 은 Business, Claude Max 는 5x/20x", () => {
+  assert.equal(api.planLabel("team", "codex"), "Business")
+  assert.equal(api.planLabel("team", "claude"), "Team")
+  assert.equal(api.planLabel("default_claude_max_20x", "claude"), "Max 20x")
+  assert.equal(api.planLabel("plus", "codex"), "Plus")
+  assert.equal(api.resetText(new Date(Date.now() - 60e3).toISOString()), "곧 초기화")
+})
+
+await test("알림: 기준 초과·초기화 예약·재로그인·초기화권 만료 임박, 같은 알림은 한 번만", async () => {
+  const soon = new Date(Date.now() + 3 * 3600e3).toISOString()
+  const accounts = [
+    { id: "a1", provider: "codex", label: "회사", status: "ok", windows: [
+      { key: "session", label: "5시간", used_percent: 93, resets_at: soon, primary: true },
+      { key: "weekly", label: "주간", used_percent: 40, resets_at: soon, primary: true }],
+      reset_credits: { items: [{ expires_at: new Date(Date.now() + 5 * 3600e3).toISOString() }, { expires_at: "2099-01-01T00:00:00Z" }] } },
+    { id: "a2", provider: "claude", label: "부계정", status: "needs_login", last_success_at: "2026-01-01T00:00:00Z", windows: [] },
+    { id: "a3", provider: "claude", label: "오래된값", status: "error", stale: true,
+      windows: [{ key: "session", label: "현재 세션", used_percent: 99, resets_at: soon, primary: true }] },
+  ]
+  notifications.length = 0
+  await api.checkAlerts(accounts)
+  const ids = notifications.map((n) => n.id).sort()
+  assert.deepEqual(ids, ["aiusage-credit-a1-" + Date.parse(accounts[0].reset_credits.items[0].expires_at), "aiusage-high-a1-session",
+    "aiusage-login-a2", "aiusage-reset-a1-session"].sort())
+  const high = notifications.find((n) => n.id === "aiusage-high-a1-session")
+  assert.equal(high.title, "Codex · 회사")
+  assert.match(high.body, /^5시간 사용량이 93%예요\. (2시간 5\d분|3시간) 후 초기화돼요\.$/)
+  assert.equal(notifications.find((n) => n.id === "aiusage-reset-a1-session").at.toISOString(), new Date(soon).toISOString())
+  // 다시 확인해도 같은 알림은 보내지 않는다
+  notifications.length = 0
+  await api.checkAlerts(accounts)
+  assert.equal(notifications.length, 0)
+  // 기준을 낮추면 주간(40%)도 알림. 끄면 아무것도 보내지 않는다.
+  api.saveNotifySettings({ enabled: true, threshold: 40 })
+  await api.checkAlerts(accounts)
+  assert.deepEqual(notifications.map((n) => n.id).sort(), ["aiusage-high-a1-weekly", "aiusage-reset-a1-weekly"])
+  notifications.length = 0
+  api.saveNotifySettings({ enabled: false, threshold: 40 })
+  await api.checkAlerts([{ ...accounts[0], id: "a9" }])
+  assert.equal(notifications.length, 0)
+  api.saveNotifySettings({ enabled: true, threshold: 90 })
 })
 
 // ── 3. 위젯이 기기 모드에서 그려지는지 (전체 스크립트 실행) ──

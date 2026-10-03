@@ -8,7 +8,6 @@
 // • 두 가지 방식: 서버 모드(직접 띄운 서버가 수집) / 기기 모드(서버 없이 이 스크립트가 직접 조회)
 // • 앱에서 실행하면 설정·계정 관리 화면이 열립니다.
 // • 위젯 Parameter 에 계정 이름(또는 id)을 쉼표로 적으면 그 계정만 표시합니다. 예) 개인,회사
-// • 서버 없이 디자인만 보려면 앱에서 '데모 모드'를 켜거나, 위젯 Parameter 에 demo 를 적으세요.
 
 const VERSION = "0.2.0"
 const KC_SERVER = "aiusage.server"
@@ -39,23 +38,8 @@ const C = {
 }
 
 // ───────────────────────── 설정 / API ─────────────────────────
-// 데모 모드: 서버 없이 가짜 데이터로 위젯·앱 UI 를 확인한다.
-// 앱 첫 화면에서 켜거나, 위젯 Parameter 에 `demo` 를 적으면 그 위젯만 데모로 그린다.
-const KC_DEMO = "aiusage.demo"
-let FORCE_DEMO = false
-
-function isDemo() {
-  return FORCE_DEMO || (Keychain.contains(KC_DEMO) && Keychain.get(KC_DEMO) === "1")
-}
-
-function setDemo(on) {
-  if (on) Keychain.set(KC_DEMO, "1")
-  else if (Keychain.contains(KC_DEMO)) Keychain.remove(KC_DEMO)
-}
-
 function getConfig() {
-  if (isDemo()) return { server: "데모 모드", demo: true }
-  if (getMode() === "device") return { server: "이 기기에서 직접 조회", device: true }
+  if (getMode() === "device") return { server: "이 iPhone에서 직접 확인", device: true }
   const server = Keychain.contains(KC_SERVER) ? Keychain.get(KC_SERVER) : null
   const apiKey = Keychain.contains(KC_KEY) ? Keychain.get(KC_KEY) : null
   return server && apiKey ? { server, apiKey } : null
@@ -68,202 +52,7 @@ class ApiError extends Error {
   }
 }
 
-// ── 데모용 가짜 서버 (상태는 기기 로컬 파일에 저장) ──
-const DEMO_FILE = "aiusage-demo.json"
-const H = 3600
-const D = 86400
-
-function demoWin(key, label, used, resetIn, opts = {}) {
-  return { key, label, group: opts.group || null, used_percent: used, remaining_percent: used == null ? null : 100 - used,
-    reset_in: resetIn, window_seconds: opts.seconds || null, primary: !!opts.primary }
-}
-
-function demoSeed() {
-  return [
-    { id: "claude_demo1", provider: "claude", label: "개인", email: "me@example.com", plan: "max", enabled: true,
-      status: "ok", auth: { oauth: true, session_key: true, reset_credits_supported: true },
-      windows: [demoWin("session", "5시간", 42, 2 * H + 13 * 60, { primary: true, seconds: 5 * H }),
-        demoWin("weekly", "주간", 68, 3 * D + 11 * H, { primary: true, seconds: 7 * D }),
-        demoWin("weekly_opus", "Opus 주간", 23, 3 * D + 11 * H, { seconds: 7 * D })],
-      reset_credits: { available: 2, expires_in: [5 * D, 12 * D] },
-      extra: { extra_usage: { used: 12.4, limit: 50, used_percent: 24.8, currency: "USD" } } },
-    { id: "codex_demo1", provider: "codex", label: "회사", email: "work@example.com", plan: "plus", enabled: true,
-      status: "ok", auth: { oauth: true, reset_credits_supported: true },
-      windows: [demoWin("session", "5시간", 93, 47 * 60, { primary: true, seconds: 5 * H }),
-        demoWin("weekly", "주간", 77, 5 * D + 2 * H, { primary: true, seconds: 7 * D }),
-        demoWin("spark:session", "5시간", 4, 47 * 60, { group: "GPT-5.3-Codex-Spark", seconds: 5 * H })],
-      reset_credits: { available: 1, expires_in: [20 * D] }, extra: { credits: { unlimited: false, balance: 3.5 } } },
-    { id: "ag_demo1", provider: "antigravity", label: "구글", email: "me@gmail.com", plan: "Paid", enabled: true,
-      status: "partial", warnings: ["요약 조회 실패, 모델별 조회로 대체"], auth: { oauth: true, reset_credits_supported: false },
-      windows: [demoWin("gemini:5h", "5시간", 55, 3 * H, { group: "Gemini Models", primary: true, seconds: 5 * H }),
-        demoWin("gemini:wk", "주간", 31, 6 * D, { group: "Gemini Models", seconds: 7 * D }),
-        demoWin("claude_gpt:5h", "5시간", 12, 3 * H, { group: "Claude and GPT models", primary: true, seconds: 5 * H })],
-      reset_credits: null, extra: {} },
-    { id: "claude_demo2", provider: "claude", label: "부계정", email: "alt@example.com", plan: "pro", enabled: true,
-      status: "needs_login", stale: true, error: "토큰 갱신 거부(HTTP 400). 다시 로그인하세요.",
-      auth: { oauth: true, session_key: false, reset_credits_supported: false },
-      windows: [demoWin("session", "5시간", 8, 4 * H, { primary: true, seconds: 5 * H }),
-        demoWin("weekly", "주간", 15, 6 * D, { primary: true, seconds: 7 * D })],
-      reset_credits: null, extra: {} },
-  ]
-}
-
-function demoLoad() {
-  const p = fm.joinPath(fm.documentsDirectory(), DEMO_FILE)
-  try {
-    if (fm.fileExists(p)) return JSON.parse(fm.readString(p))
-  } catch (e) {}
-  return { accounts: demoSeed(), updated: Date.now() }
-}
-
-function demoSave(state) {
-  fm.writeString(fm.joinPath(fm.documentsDirectory(), DEMO_FILE), JSON.stringify(state))
-}
-
-function demoReset() {
-  const p = fm.joinPath(fm.documentsDirectory(), DEMO_FILE)
-  if (fm.fileExists(p)) fm.remove(p)
-}
-
-function demoUsage(a, updated) {
-  const at = (sec) => (sec == null ? null : new Date(updated + sec * 1000).toISOString())
-  const ts = new Date(updated).toISOString()
-  return {
-    id: a.id, provider: a.provider, provider_name: providerName(a.provider), label: a.label, email: a.email,
-    plan: a.plan, status: a.status, error: a.error || null, warnings: a.warnings || [], stale: !!a.stale,
-    fetched_at: ts, last_success_at: a.stale ? new Date(updated - 2 * D * 1000).toISOString() : ts,
-    windows: a.windows.map((w) => ({ ...w, resets_at: at(w.reset_in) })),
-    reset_credits: a.reset_credits && {
-      available: a.reset_credits.available,
-      next_expires_at: at(a.reset_credits.expires_in[0]),
-      expirations: a.reset_credits.expires_in.map(at),
-      items: a.reset_credits.expires_in.map((e, i) => ({
-        title: a.provider === "codex" ? "Rate limit reset" : null,
-        description: null,
-        reset_type: null,
-        granted_at: at(e - 30 * D + i * D),
-        expires_at: at(e),
-      })),
-    },
-    extra: a.extra || {},
-  }
-}
-
-function demoAccount(a, updated) {
-  const u = demoUsage(a, updated)
-  return { id: a.id, provider: a.provider, provider_name: u.provider_name, label: a.label, email: a.email, plan: a.plan,
-    enabled: a.enabled, auth: a.auth, status: a.status, error: u.error, fetched_at: u.fetched_at,
-    last_success_at: u.last_success_at }
-}
-
-function demoNewAccount(provider, label) {
-  const n = Math.floor(Math.random() * 1000)
-  const rnd = () => Math.round(Math.random() * 90)
-  const base = { id: `${provider}_demo${n}`, provider, label: label || `${providerName(provider)} ${n}`,
-    email: `demo${n}@example.com`, plan: null, enabled: true, status: "ok", extra: {} }
-  if (provider === "antigravity") {
-    return { ...base, auth: { oauth: true, reset_credits_supported: false }, reset_credits: null,
-      windows: [demoWin("gemini:5h", "5시간", rnd(), 2 * H, { group: "Gemini Models", primary: true, seconds: 5 * H }),
-        demoWin("claude_gpt:5h", "5시간", rnd(), 2 * H, { group: "Claude and GPT models", primary: true, seconds: 5 * H })] }
-  }
-  return { ...base, auth: { oauth: true, session_key: false, reset_credits_supported: provider === "codex" },
-    reset_credits: provider === "codex" ? { available: 0, expires_in: [] } : null,
-    windows: [demoWin("session", "5시간", rnd(), 3 * H, { primary: true, seconds: 5 * H }),
-      demoWin("weekly", "주간", rnd(), 4 * D, { primary: true, seconds: 7 * D })] }
-}
-
-async function demoApi(method, path, body) {
-  const state = demoLoad()
-  const { accounts } = state
-  const find = (id) => {
-    const a = accounts.find((x) => x.id === id)
-    if (!a) throw new ApiError("계정이 없습니다.", 404)
-    return a
-  }
-  const save = () => demoSave(state)
-  const route = `${method} ${path.split("?")[0]}`
-  let m
-
-  if (route === "GET /v1/usage") {
-    if (path.includes("refresh=1")) {
-      state.updated = Date.now()
-      save()
-    }
-    return { generated_at: new Date(state.updated).toISOString(), poll_interval: 300,
-      accounts: accounts.filter((a) => a.enabled).map((a) => demoUsage(a, state.updated)) }
-  }
-  if (route === "GET /v1/providers") {
-    return { providers: [
-      { id: "claude", name: "Claude", methods: ["oauth", "session_key"], configured: true, reason: null },
-      { id: "codex", name: "Codex", methods: ["oauth"], configured: true, reason: null },
-      { id: "antigravity", name: "Antigravity", methods: ["oauth"], configured: true, reason: null },
-    ] }
-  }
-  if (route === "GET /v1/accounts") return { accounts: accounts.map((a) => demoAccount(a, state.updated)) }
-  if (route === "POST /v1/accounts") {
-    if (!String(body.session_key || "").startsWith("sk-ant-")) throw new ApiError("sessionKey 는 'sk-ant-' 로 시작해야 합니다.", 400)
-    const a = demoNewAccount("claude", body.label)
-    a.auth = { oauth: false, session_key: true, reset_credits_supported: true }
-    a.reset_credits = { available: 1, expires_in: [9 * D] }
-    accounts.push(a)
-    save()
-    return demoAccount(a, state.updated)
-  }
-  if (route === "POST /v1/logins") {
-    const loginId = `demo${Date.now()}`
-    state.logins = state.logins || {}
-    state.logins[loginId] = { provider: body.provider, label: body.label, accountId: body.account_id }
-    save()
-    return { login_id: loginId, provider: body.provider, authorize_url: null,
-      instructions: "데모 모드에서는 실제 로그인 페이지를 열지 않습니다.",
-      input_hint: "아무 값이나 입력하면 로그인된 것으로 처리합니다." }
-  }
-  if ((m = route.match(/^POST \/v1\/logins\/([\w-]+)\/complete$/))) {
-    const pending = (state.logins || {})[m[1]]
-    if (!pending) throw new ApiError("로그인 세션이 없거나 만료되었습니다.", 400)
-    delete state.logins[m[1]]
-    const { provider, label, accountId } = pending
-    if (accountId) {
-      const a = find(accountId)
-      Object.assign(a, { status: "ok", stale: false, error: null })
-      save()
-      return demoAccount(a, state.updated)
-    }
-    const a = demoNewAccount(provider, label)
-    accounts.push(a)
-    save()
-    return demoAccount(a, state.updated)
-  }
-  if ((m = route.match(/^GET \/v1\/accounts\/([\w-]+)$/))) {
-    const a = find(m[1])
-    return { account: demoAccount(a, state.updated), usage: demoUsage(a, state.updated) }
-  }
-  if ((m = route.match(/^PATCH \/v1\/accounts\/([\w-]+)$/))) {
-    const a = find(m[1])
-    if (body.label) a.label = body.label
-    if ("enabled" in body) a.enabled = !!body.enabled
-    if ("session_key" in body) {
-      a.auth.session_key = !!body.session_key
-      a.auth.reset_credits_supported = !!body.session_key
-      a.reset_credits = body.session_key ? { available: 1, expires_in: [7 * D] } : null
-    }
-    save()
-    return demoAccount(a, state.updated)
-  }
-  if ((m = route.match(/^DELETE \/v1\/accounts\/([\w-]+)$/))) {
-    find(m[1])
-    state.accounts = accounts.filter((a) => a.id !== m[1])
-    save()
-    return { deleted: m[1] }
-  }
-  if ((m = route.match(/^POST \/v1\/accounts\/([\w-]+)\/refresh$/))) {
-    const a = find(m[1])
-    for (const w of a.windows) w.used_percent = Math.min(100, Math.round((w.used_percent || 0) + Math.random() * 5))
-    save()
-    return demoUsage(a, state.updated)
-  }
-  throw new ApiError(`데모에서 지원하지 않는 요청: ${route}`, 404)
-}
+const DAY_MS = 86400 * 1000
 
 // ───────────────────────── 기기 모드 (서버 없이) ─────────────────────────
 // 서버가 하던 일(로그인·토큰 갱신·조회)을 이 스크립트가 직접 한다. 화면 쪽은 서버와 같은 API 형식을 그대로 쓴다.
@@ -572,33 +361,54 @@ const CLAUDE = {
   redirectUri: "https://platform.claude.com/oauth/code/callback",
   scopes: ["org:create_api_key", "user:profile", "user:inference", "user:sessions:claude_code", "user:mcp_servers", "user:file_upload"],
   usageUrl: "https://api.anthropic.com/api/oauth/usage",
+  profileUrl: "https://api.anthropic.com/api/oauth/profile",
   webBase: "https://claude.ai/api",
   userAgent: "claude-code/2.1.0",
   webUserAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1",
 }
 
+// 표시할 사용량 창(Claude Code 의 /usage 와 같은 것만). 응답에는 내부 코드네임 블록
+// (예: iguana_necktie)도 섞여 오므로, 모르는 키는 보여주지 않는다.
 const CLAUDE_WINDOWS = [
-  ["five_hour", "session", "5시간", 5 * 3600, true],
-  ["seven_day", "weekly", "주간", 7 * 86400, true],
-  ["seven_day_opus", "weekly_opus", "Opus 주간", 7 * 86400, false],
-  ["seven_day_sonnet", "weekly_sonnet", "Sonnet 주간", 7 * 86400, false],
+  ["five_hour", "session", "현재 세션", 5 * 3600, true],
+  ["seven_day", "weekly", "이번 주", 7 * 86400, true],
+  ["seven_day_opus", "weekly_opus", "Opus 이번 주", 7 * 86400, false],
+  ["seven_day_sonnet", "weekly_sonnet", "Sonnet 이번 주", 7 * 86400, false],
 ]
+
+// /api/oauth/profile 의 organization_type → 플랜. Max 는 rate_limit_tier 로 5x/20x 를 구분한다.
+const CLAUDE_ORG_PLANS = { claude_max: "max", claude_pro: "pro", claude_team: "team", claude_enterprise: "enterprise" }
+
+function claudePlan(profile) {
+  const org = profile && profile.organization
+  if (!org || typeof org !== "object") return null
+  if (typeof org.rate_limit_tier === "string" && /max_\d+x/.test(org.rate_limit_tier)) return org.rate_limit_tier
+  return CLAUDE_ORG_PLANS[org.organization_type] || null
+}
+
+// 플랜은 부가 정보라 실패해도 사용량 조회를 막지 않는다
+async function claudeFetchPlan(accessToken) {
+  try {
+    const res = await devHttp("GET", CLAUDE.profileUrl, { headers: { Authorization: `Bearer ${accessToken}`, "User-Agent": CLAUDE.userAgent } })
+    return res.ok ? claudePlan(res.json()) : null
+  } catch (e) {
+    return null
+  }
+}
 
 function claudeWindows(data) {
   const out = []
-  const seen = new Set()
   for (const [src, key, label, seconds, primary] of CLAUDE_WINDOWS) {
-    seen.add(src)
     const b = data[src]
     if (b && typeof b === "object" && b.utilization != null)
       out.push(makeWindow(key, label, clampPct(num(b.utilization)), isoOf(msOf(b.resets_at)), { seconds, primary }))
   }
-  // 그 밖에 utilization 을 가진 블록도 추가(새 한도가 생겨도 보이게)
-  for (const [src, b] of Object.entries(data)) {
-    if (seen.has(src) || src === "extra_usage" || src === "cedar_ember") continue
-    if (b && typeof b === "object" && b.utilization != null && "resets_at" in b)
-      out.push(makeWindow(src, src.replace("seven_day_", "주간 ").replace(/_/g, " "), clampPct(num(b.utilization)),
-        isoOf(msOf(b.resets_at)), { seconds: src.startsWith("seven_day") ? 7 * 86400 : null }))
+  // 모델별 주간 한도(예: Fable). limits[] 중 kind 가 weekly_scoped 인 것.
+  for (const item of Array.isArray(data.limits) ? data.limits : []) {
+    const model = item && item.kind === "weekly_scoped" && ((item.scope || {}).model || {}).display_name
+    if (typeof model !== "string" || !model.trim()) continue
+    const resets = typeof item.resets_at === "number" ? isoOf(item.resets_at * 1000) : isoOf(msOf(item.resets_at))
+    out.push(makeWindow(`model:${model}`, `${model} 이번 주`, clampPct(num(item.percent)), resets, { seconds: 7 * 86400 }))
   }
   return out
 }
@@ -680,8 +490,8 @@ const claudeProvider = {
         code: "true", client_id: CLAUDE.clientId, response_type: "code", redirect_uri: CLAUDE.redirectUri,
         scope: CLAUDE.scopes.join(" "), code_challenge: challenge, code_challenge_method: "S256", state,
       }),
-      instructions: "Claude 계정으로 로그인해 승인하면 코드가 표시됩니다. 'Copy Code'로 복사해 붙여넣으세요.",
-      input_hint: "code#state 형식의 코드",
+      instructions: "Claude 계정으로 로그인해 승인하면 코드가 나와요. 'Copy Code'를 눌러 복사한 뒤 돌아오세요.",
+      input_hint: "복사한 코드 (code#state 형식)",
       pending: { verifier, state },
     }
   },
@@ -698,7 +508,7 @@ const claudeProvider = {
     const creds = { oauth: claudeOAuth(data) }
     if (data.organization && data.organization.uuid) creds.org_id = data.organization.uuid
     const account = data.account || {}
-    return { creds, email: account.email_address || account.email || null }
+    return { creds, email: account.email_address || account.email || null, plan: await claudeFetchPlan(creds.oauth.access_token) }
   },
 
   async createManual({ session_key }) {
@@ -739,6 +549,8 @@ const claudeProvider = {
       const data = res.json()
       usage.windows = claudeWindows(data)
       usage.extra = claudeExtra(data)
+      // 사용량 응답에는 플랜이 없어 프로필로 따로 조회(바뀔 일이 드물어 모를 때만)
+      if (!ctx.knownPlan) usage.plan = await claudeFetchPlan(creds.oauth.access_token)
     }
     if (creds.session_key) {
       let web = null
@@ -851,8 +663,8 @@ const codexProvider = {
         scope: "openid profile email offline_access", code_challenge: challenge, code_challenge_method: "S256",
         id_token_add_organizations: "true", codex_cli_simplified_flow: "true", originator: "codex_cli_rs", state,
       }),
-      instructions: "ChatGPT 계정으로 로그인하면 localhost 페이지로 이동하며 '연결할 수 없음'이 뜹니다. 정상입니다. 주소창의 전체 URL을 복사해 붙여넣으세요.",
-      input_hint: "http://localhost:1455/auth/callback?code=... 전체 URL",
+      instructions: "ChatGPT 계정으로 로그인하면 '연결할 수 없음' 페이지가 떠요. 정상이에요. 주소창의 주소를 통째로 복사한 뒤 돌아오세요.",
+      input_hint: "localhost:1455 로 시작하는 주소 전체",
       pending: { verifier, state },
     }
   },
@@ -935,7 +747,7 @@ function agClient() {
 
 function agRequireClient() {
   const c = agClient()
-  if (!c) throw new ProviderError("설정 → Antigravity 로그인 설정에서 Client ID/Secret 을 입력하세요.")
+  if (!c) throw new ProviderError("설정 → Antigravity 로그인 설정에서 Client ID와 Secret을 먼저 넣어 주세요.")
   return c
 }
 
@@ -1031,7 +843,7 @@ async function agPost(method, token, body) {
 
 const antigravityProvider = {
   methods: ["oauth"],
-  configured: () => (agClient() ? [true, null] : [false, "설정 → Antigravity 로그인 설정에서 Client ID/Secret 을 입력하세요."]),
+  configured: () => (agClient() ? [true, null] : [false, "설정 → Antigravity 로그인 설정에서 Client ID와 Secret을 먼저 넣어 주세요."]),
   refreshToken: (c) => c.refresh_token,
   needsRefresh: (c) => (c.expires_at || 0) - 2 * 60 * 1000 < Date.now(),
 
@@ -1042,8 +854,8 @@ const antigravityProvider = {
         client_id: agRequireClient().id, redirect_uri: AG.redirectUri, response_type: "code", scope: AG.scopes.join(" "),
         access_type: "offline", prompt: "select_account consent", state,
       }),
-      instructions: "Antigravity 에서 쓰는 Google 계정으로 로그인하면 127.0.0.1 페이지로 이동하며 열리지 않습니다. 정상입니다. 주소창의 전체 URL을 복사해 붙여넣으세요.",
-      input_hint: "http://127.0.0.1:8585/callback?code=... 전체 URL",
+      instructions: "Antigravity에서 쓰는 Google 계정으로 로그인하면 열리지 않는 페이지로 이동해요. 정상이에요. 주소창의 주소를 통째로 복사한 뒤 돌아오세요.",
+      input_hint: "127.0.0.1:8585 로 시작하는 주소 전체",
       pending: { state },
     }
   },
@@ -1135,7 +947,8 @@ const DEVICE_PROVIDERS = { claude: claudeProvider, codex: codexProvider, antigra
 // ── 기기 저장소 ──
 const devPath = (name) => fm.joinPath(fm.documentsDirectory(), name)
 
-function devRead(name, fallback) {
+// Scriptable 문서 폴더의 JSON 파일(앱과 위젯이 같이 쓴다)
+function readJSON(name, fallback) {
   try {
     const p = devPath(name)
     return fm.fileExists(p) ? JSON.parse(fm.readString(p)) : fallback
@@ -1144,13 +957,13 @@ function devRead(name, fallback) {
   }
 }
 
-const devWrite = (name, data) => fm.writeString(devPath(name), JSON.stringify(data))
-const devAccounts = () => devRead(DEV_ACCOUNTS_FILE, []).sort((a, b) => (a.order || 0) - (b.order || 0))
-const devSaveAccounts = (list) => devWrite(DEV_ACCOUNTS_FILE, list)
+const writeJSON = (name, data) => fm.writeString(devPath(name), JSON.stringify(data))
+const devAccounts = () => readJSON(DEV_ACCOUNTS_FILE, []).sort((a, b) => (a.order || 0) - (b.order || 0))
+const devSaveAccounts = (list) => writeJSON(DEV_ACCOUNTS_FILE, list)
 // 사용량은 계정마다 파일을 나눠, 여러 위젯이 동시에 써도 서로 덮어쓰지 않게 한다
 const devSnapName = (id) => `aiusage-device-snap-${id}.json`
-const devGetSnap = (id) => devRead(devSnapName(id), null)
-const devPutSnap = (id, snap) => devWrite(devSnapName(id), snap)
+const devGetSnap = (id) => readJSON(devSnapName(id), null)
+const devPutSnap = (id, snap) => writeJSON(devSnapName(id), snap)
 const devCredKey = (id) => `aiusage.dev.creds.${id}`
 
 function devGetCreds(id) {
@@ -1222,6 +1035,7 @@ async function devRefreshAccount(acc, minAgeMs) {
     const ctx = {
       refresh: (c) => devRefreshCreds(acc, provider, c),
       save: (c) => devSaveCreds(acc.id, c),
+      knownPlan: prev.plan || acc.plan || null,
     }
     const u = await provider.fetch(creds, ctx)
     Object.assign(snap, {
@@ -1320,23 +1134,23 @@ async function deviceApi(method, path, body) {
       const p = devProvider(body.provider)
       if (body.account_id) devFind(body.account_id)
       const start = p.startLogin()
-      const logins = devRead(DEV_LOGINS_FILE, {})
+      const logins = readJSON(DEV_LOGINS_FILE, {})
       for (const [k, v] of Object.entries(logins)) if (Date.now() - v.created > DEV_LOGIN_TTL_MS) delete logins[k]
       const loginId = randomToken(16)
       logins[loginId] = { provider: body.provider, label: body.label || null, account_id: body.account_id || null,
         pending: start.pending, created: Date.now() }
-      devWrite(DEV_LOGINS_FILE, logins)
+      writeJSON(DEV_LOGINS_FILE, logins)
       return { login_id: loginId, provider: body.provider, authorize_url: start.authorize_url,
         instructions: start.instructions, input_hint: start.input_hint }
     }
     if ((m = route.match(/^POST \/v1\/logins\/([\w-]+)\/complete$/))) {
-      const logins = devRead(DEV_LOGINS_FILE, {})
+      const logins = readJSON(DEV_LOGINS_FILE, {})
       const entry = logins[m[1]]
       if (!entry || Date.now() - entry.created > DEV_LOGIN_TTL_MS)
         throw new ApiError("로그인 세션이 없거나 만료되었습니다. 처음부터 다시 시작하세요.", 400)
       const result = await devProvider(entry.provider).finishLogin(entry.pending, body.input)
       delete logins[m[1]]
-      devWrite(DEV_LOGINS_FILE, logins)
+      writeJSON(DEV_LOGINS_FILE, logins)
       const acc = devUpsert(entry.provider, entry.account_id, entry.label, result)
       await devRefreshAccount(acc, 0)
       return devPublic(devFind(acc.id))
@@ -1391,7 +1205,6 @@ async function deviceApi(method, path, body) {
 async function api(method, path, body, timeout = 25) {
   const cfg = getConfig()
   if (!cfg) throw new ApiError("서버 설정이 필요합니다.", 0)
-  if (cfg.demo) return demoApi(method, path, body || {})
   if (cfg.device) return deviceApi(method, path, body || {})
   const req = new Request(cfg.server.replace(/\/+$/, "") + path)
   req.method = method
@@ -1433,7 +1246,7 @@ function writeCache(data) {
 async function loadUsage(refresh = false) {
   try {
     const data = await api("GET", `/v1/usage${refresh ? "?refresh=1" : ""}`, undefined, refresh ? 40 : 15)
-    if (!isDemo()) writeCache(data)
+    writeCache(data)
     return { data, offline: false }
   } catch (e) {
     const cached = readCache()
@@ -1508,9 +1321,11 @@ const PLAN_NAMES = {
   default_claude_max_5x: "Max 5x", default_claude_max_20x: "Max 20x", claude_max: "Max", claude_pro: "Pro",
 }
 
-function planLabel(plan) {
+function planLabel(plan, provider) {
   if (!plan) return null
   const key = String(plan).toLowerCase().trim()
+  // ChatGPT 는 Team 요금제 이름이 Business 로 바뀌었다(Claude 는 그대로 Team)
+  if (provider === "codex" && key === "team") return "Business"
   if (PLAN_NAMES[key]) return PLAN_NAMES[key]
   const m = key.match(/max[_ ]?(\d+)x/)
   if (m) return `Max ${m[1]}x`
@@ -1778,7 +1593,7 @@ function emptyWidget(message) {
 function buildHomeWidget(result, size, param) {
   const { data, offline } = result
   const accounts = filterAccounts(data.accounts || [], param)
-  if (!accounts.length) return emptyWidget("표시할 계정이 없습니다. Scriptable 앱에서 계정을 추가하세요.")
+  if (!accounts.length) return emptyWidget("표시할 계정이 없어요. Scriptable 앱에서 계정을 추가해 주세요.")
 
   const family = size === "extraLarge" ? "large" : LAYOUT[size] ? size : "medium"
   const L = LAYOUT[family]
@@ -1795,7 +1610,7 @@ function buildHomeWidget(result, size, param) {
     head.size = new Size(inner, 0)
     addText(head, "AI 사용량", Font.semiboldSystemFont(13), C.text)
     head.addSpacer()
-    addText(head, offline ? "오프라인 · " + fmtAgo(data.generated_at) : `${fmtAgo(data.generated_at)} 업데이트`,
+    addText(head, offline ? "오프라인 · " + fmtAgo(data.generated_at) : `${fmtAgo(data.generated_at)} 확인`,
       Font.systemFont(10), offline ? C.warn : C.sub)
     w.addSpacer(8)
   } else if (family === "medium") {
@@ -1814,7 +1629,7 @@ function buildHomeWidget(result, size, param) {
     // 소형은 공간이 빠듯해 오프라인일 때만 알린다
     addText(w, `오프라인 · ${fmtAgo(data.generated_at)}`, Font.systemFont(10), C.warn)
   } else if (family === "large" && accounts.length > shown.length) {
-    addText(w, `+${accounts.length - shown.length}개 더 · 위젯 Parameter 로 계정을 고를 수 있어요`, Font.systemFont(10), C.sub)
+    addText(w, `+${accounts.length - shown.length}개 더 · 위젯 Parameter 로 고를 수 있어요`, Font.systemFont(10), C.sub)
   }
   return w
 }
@@ -1867,27 +1682,95 @@ function buildAccessoryWidget(result, family, param) {
 
 async function runWidget() {
   const family = config.widgetFamily || "medium"
-  let param = (args.widgetParameter || "").trim()
-  const parts = param.split(",").map((x) => x.trim())
-  if (parts.includes("demo")) {
-    FORCE_DEMO = true
-    param = parts.filter((x) => x && x !== "demo").join(",")
-  }
+  const param = (args.widgetParameter || "").trim()
   let widget
   if (!getConfig()) {
-    widget = emptyWidget("Scriptable 앱에서 이 스크립트를 실행해 연결 방식을 고르세요.")
+    widget = emptyWidget("Scriptable 앱에서 이 스크립트를 한 번 실행해 연결 방식을 골라 주세요.")
   } else {
     try {
       const result = await loadUsage(false)
+      if (!result.offline) await checkAlerts(result.data.accounts)
       widget = family.startsWith("accessory")
         ? buildAccessoryWidget(result, family, param)
         : buildHomeWidget(result, family, param)
     } catch (e) {
-      widget = emptyWidget(`불러오기 실패: ${e.message}`)
+      widget = emptyWidget(`불러오지 못했어요. ${e.message}`)
     }
   }
   widget.refreshAfterDate = new Date(Date.now() + WIDGET_REFRESH_MIN * 60 * 1000)
   Script.setWidget(widget)
+}
+
+// ───────────────────────── 알림 ─────────────────────────
+// 위젯·앱이 사용량을 받을 때마다 확인해, 필요한 알림을 한 번씩만 보낸다(보낸 기록은 파일에 둔다).
+const KC_NOTIFY = "aiusage.notify"
+const NOTIFY_STATE_FILE = "aiusage-notify-state.json"
+
+function notifySettings() {
+  const base = { enabled: true, threshold: 90 }
+  try {
+    return { ...base, ...JSON.parse(Keychain.contains(KC_NOTIFY) ? Keychain.get(KC_NOTIFY) : "{}") }
+  } catch (e) {
+    return base
+  }
+}
+
+function saveNotifySettings(settings) {
+  Keychain.set(KC_NOTIFY, JSON.stringify(settings))
+}
+
+// at 이 있으면 그 시각에 예약. 같은 id 로 다시 예약하면 이전 예약을 대신한다.
+async function sendNotification({ id, title, body, at }) {
+  const n = new Notification()
+  n.identifier = id
+  n.threadIdentifier = "aiusage"
+  n.title = title
+  n.body = body
+  n.openURL = URLScheme.forRunningScript() // 누르면 이 스크립트가 열린다
+  if (at) n.setTriggerDate(at)
+  await n.schedule()
+}
+
+async function checkAlerts(accounts) {
+  const settings = notifySettings()
+  if (!settings.enabled) return
+  const now = Date.now()
+  const sent = readJSON(NOTIFY_STATE_FILE, {})
+  const once = (key) => !sent[key] && (sent[key] = now)
+  const jobs = []
+  for (const acc of accounts) {
+    const who = `${providerName(acc.provider)} · ${acc.label}`
+    if (acc.status === "needs_login") {
+      if (once(`login:${acc.id}:${acc.last_success_at}`))
+        jobs.push({ id: `aiusage-login-${acc.id}`, title: who, body: "다시 로그인해야 사용량을 가져올 수 있어요. 눌러서 열어 주세요." })
+      continue
+    }
+    if (acc.stale) continue
+    for (const w of primaryWindows(acc)) {
+      if (w.used_percent == null || w.used_percent < settings.threshold) continue
+      const name = windowTitle(w)
+      const period = `${acc.id}:${w.key}:${w.resets_at}`
+      if (once(`high:${period}`))
+        jobs.push({ id: `aiusage-high-${acc.id}-${w.key}`, title: who,
+          body: `${name} 사용량이 ${Math.round(w.used_percent)}%예요.${w.resets_at ? ` ${resetText(w.resets_at)}돼요.` : ""}` })
+      const at = msOf(w.resets_at)
+      if (at && at > now && once(`reset:${period}`))
+        jobs.push({ id: `aiusage-reset-${acc.id}-${w.key}`, title: who, body: `${name} 한도가 초기화됐어요. 다시 쓸 수 있어요.`, at: new Date(at) })
+    }
+    for (const item of (acc.reset_credits && acc.reset_credits.items) || []) {
+      const exp = msOf(item.expires_at)
+      if (exp && exp > now && exp - now < DAY_MS && once(`credit:${acc.id}:${item.expires_at}`))
+        jobs.push({ id: `aiusage-credit-${acc.id}-${exp}`, title: who,
+          body: `초기화권 1장이 ${fmtDuration(item.expires_at)} 뒤에 만료돼요. 필요하면 그 전에 쓰세요.` })
+    }
+  }
+  for (const [key, t] of Object.entries(sent)) if (now - t > 14 * DAY_MS) delete sent[key] // 2주 지난 기록 정리
+  writeJSON(NOTIFY_STATE_FILE, sent)
+  for (const job of jobs) {
+    try {
+      await sendNotification(job)
+    } catch (e) {} // 알림 권한이 없으면 조용히 넘어간다
+  }
 }
 
 // ───────────────────────── 앱 UI: 공용 ─────────────────────────
@@ -1938,76 +1821,74 @@ async function guarded(fn) {
   }
 }
 
-// ───────────────────────── 앱 UI: 설정 ─────────────────────────
+// ───────────────────────── 앱 UI: 연결 설정 ─────────────────────────
 async function setupServer() {
   const cfg = getConfig()
-  const cur = cfg && !cfg.demo ? cfg : {}
-  const server = await prompt("서버 주소", "리버스 프록시 뒤의 서버 URL\n예) https://ai.example.com", {
+  const cur = cfg && !cfg.device ? cfg : {}
+  const server = await prompt("서버 주소", "직접 띄운 사용량 서버의 주소예요.\n예) https://ai.example.com", {
     placeholder: "https://",
     value: cur.server || "",
   })
   if (!server) return false
-  const key = await prompt("API 키", "서버의 AIUSAGE_API_KEY 값", {
-    secure: true,
-    value: cur.apiKey || "",
-  })
+  const key = await prompt("API 키", "서버에 설정한 AIUSAGE_API_KEY 값이에요.", { secure: true, value: cur.apiKey || "" })
   if (!key) return false
   Keychain.set(KC_SERVER, server.replace(/\/+$/, ""))
   Keychain.set(KC_KEY, key)
   setMode("server")
-  setDemo(false)
   try {
     await api("GET", "/v1/accounts")
-    await alertMsg("연결 성공", "서버에 연결되었습니다.")
+    await alertMsg("연결됐어요", "이제 서버에 등록된 계정을 보여 드려요.")
     return true
   } catch (e) {
-    await alertMsg("연결 실패", `${e.message}\n설정은 저장되었습니다. 주소와 키를 확인하세요.`)
+    await alertMsg("연결하지 못했어요", `${e.message}\n\n입력한 값은 저장해 뒀어요. 주소와 키를 다시 확인해 주세요.`)
     return false
   }
 }
 
 async function useDeviceMode() {
   setMode("device")
-  setDemo(false)
-  await alertMsg("기기 모드", "서버 없이 이 스크립트가 직접 조회합니다.\n로그인 정보는 iOS 키체인에 저장되고, 계정 목록은 서버 모드와 따로 관리됩니다.\n\n'계정 추가'로 시작하세요.")
+  await alertMsg(
+    "기기 모드",
+    "서버 없이 이 iPhone에서 바로 사용량을 가져와요.\n로그인 정보는 iOS 키체인에 보관하고, 계정 목록은 서버 모드와 따로 관리해요.\n\n'계정 추가'로 시작해 보세요."
+  )
   return true
 }
 
+// 처음 실행할 때와 설정에서 쓰는 연결 방식 선택. 바꿨으면 true.
+async function chooseMode(title, message) {
+  const i = await choose(title, message, ["이 iPhone에서 직접 (서버 없이)", "내 서버에 연결"], false)
+  if (i === 0) return useDeviceMode()
+  if (i === 1) return setupServer()
+  return false
+}
+
 const AG_CLIENT_HELP =
-  "Antigravity 앱 설치 폴더의 resources/app/out/main.js 에서 '….apps.googleusercontent.com' 으로 끝나는 값(Client ID)과 'GOCSPX-' 로 시작하는 값(Client Secret)을 찾아 넣으세요."
+  "PC에 설치한 Antigravity 앱의 resources/app/out/main.js 파일에서 두 값을 찾아 넣어 주세요.\n\n• Client ID: ….apps.googleusercontent.com 으로 끝나는 값\n• Client Secret: GOCSPX- 로 시작하는 값"
 
 async function setupAntigravityClient() {
   const cur = agClient() || {}
   const id = await prompt("Antigravity Client ID", AG_CLIENT_HELP, { value: cur.id || "", placeholder: "….apps.googleusercontent.com" })
   if (!id) return false
-  const secret = await prompt("Antigravity Client Secret", "GOCSPX- 로 시작하는 값", { secure: true, value: cur.secret || "", placeholder: "GOCSPX-…" })
+  const secret = await prompt("Antigravity Client Secret", "GOCSPX- 로 시작하는 값이에요.", { secure: true, value: cur.secret || "", placeholder: "GOCSPX-…" })
   if (!secret) return false
   Keychain.set(KC_AG_CLIENT, JSON.stringify({ id, secret }))
-  await alertMsg("저장됨", "이제 Antigravity 계정을 추가할 수 있습니다.")
+  await alertMsg("저장했어요", "이제 Antigravity 계정을 추가할 수 있어요.")
   return true
 }
 
 // ───────────────────────── 앱 UI: 로그인 ─────────────────────────
 async function oauthLogin(provider, { label, accountId } = {}) {
   const start = await api("POST", "/v1/logins", { provider, label: label || undefined, account_id: accountId })
-  const hasPage = !!start.authorize_url
-  const go = new Alert()
-  go.title = "로그인"
-  go.message = hasPage
-    ? `${start.instructions}\n\n1) '로그인 페이지 열기'를 누르세요.\n2) 로그인을 마친 뒤 안내된 값을 복사하세요.\n3) Scriptable 로 돌아와 붙여넣으세요.`
-    : start.instructions
-  go.addAction(hasPage ? "로그인 페이지 열기" : "계속")
-  go.addCancelAction("취소")
-  if ((await go.presentAlert()) !== 0) return null
-  if (hasPage) Safari.open(start.authorize_url)
+  if (!(await confirm(`${providerName(provider)} 로그인`, `${start.instructions}\n\n로그인 페이지를 열까요?`, "로그인 페이지 열기"))) return null
+  Safari.open(start.authorize_url)
 
   while (true) {
     const a = new Alert()
-    a.title = "로그인 결과 붙여넣기"
-    a.message = `${start.input_hint}\n\n복사했다면 '클립보드에서 붙여넣기'를 누르세요.`
-    a.addAction("클립보드에서 붙여넣기")
+    a.title = "복사한 값 붙여넣기"
+    a.message = `${start.input_hint}\n\n복사해 왔다면 '붙여넣기'를 누르세요.`
+    a.addAction("붙여넣기")
     a.addAction("직접 입력")
-    if (hasPage) a.addAction("로그인 페이지 다시 열기")
+    a.addAction("로그인 페이지 다시 열기")
     a.addCancelAction("취소")
     const i = await a.presentAlert()
     if (i === -1) return null
@@ -2015,51 +1896,52 @@ async function oauthLogin(provider, { label, accountId } = {}) {
       Safari.open(start.authorize_url)
       continue
     }
-    let input = i === 0 ? (Pasteboard.paste() || "").trim() : await prompt("직접 입력", start.input_hint)
+    const input = i === 0 ? (Pasteboard.paste() || "").trim() : await prompt("직접 입력", start.input_hint)
+    if (input === null) continue
     if (!input) {
-      await alertMsg("비어 있음", "클립보드나 입력값이 비어 있습니다.")
+      await alertMsg("클립보드가 비어 있어요", "복사가 안 된 것 같아요. 로그인 페이지에서 다시 복사해 주세요.")
       continue
     }
     try {
       const acc = await api("POST", `/v1/logins/${start.login_id}/complete`, { input }, 60)
-      await alertMsg("완료", `${acc.label} (${acc.email || acc.provider_name}) 계정이 등록되었습니다.\n상태: ${STATUS_TEXT[acc.status] || acc.status}`)
+      const status = acc.status === "ok" ? "" : `\n\n상태: ${STATUS_TEXT[acc.status] || acc.status}`
+      await alertMsg(accountId ? "다시 로그인했어요" : "계정을 추가했어요", `${acc.label}${acc.email ? ` (${acc.email})` : ""}${status}`)
       return acc
     } catch (e) {
-      const retry = await confirm("로그인 실패", `${e.message}\n\n다시 붙여넣을까요?`, "다시 시도")
-      if (!retry) return null
+      if (!(await confirm("로그인하지 못했어요", `${e.message}\n\n다시 붙여넣을까요?`, "다시 시도"))) return null
     }
   }
 }
 
 const SESSION_KEY_HELP =
-  "claude.ai 에 로그인된 PC 브라우저에서 개발자 도구 → Application(저장소) → Cookies → https://claude.ai 의 'sessionKey' 값(sk-ant-…)을 복사하세요.\n\n초기화권은 claude.ai 웹 API 에서만 조회할 수 있어서 필요합니다."
+  "초기화권은 claude.ai 웹에서만 확인할 수 있어서 sessionKey 가 필요해요.\n\nPC 브라우저로 claude.ai 에 로그인한 뒤 개발자 도구 → Application → Cookies → https://claude.ai 에서 'sessionKey' 값(sk-ant-…)을 복사해 주세요."
 
 async function addAccount() {
   const { providers } = await api("GET", "/v1/providers")
   const labels = providers.map((p) => (p.configured ? p.name : `${p.name} (설정 필요)`))
-  const i = await choose("계정 추가", "서비스를 선택하세요.", labels)
+  const i = await choose("계정 추가", "어떤 서비스를 추가할까요?", labels)
   if (i < 0) return
   const p = providers[i]
   if (!p.configured) {
-    if (!getConfig().device || p.id !== "antigravity") return alertMsg("설정 필요", p.reason)
+    if (!getConfig().device || p.id !== "antigravity") return alertMsg("설정이 필요해요", p.reason)
     if (!(await setupAntigravityClient())) return
   }
 
-  const label = await prompt("이름 (선택)", "위젯에 표시할 이름. 비우면 이메일 앞부분을 씁니다.", { placeholder: "예) 개인" })
+  const label = await prompt("이름", "위젯에 보일 이름이에요. 비워 두면 이메일 앞부분을 써요.", { placeholder: "예) 개인" })
   if (label === null) return
 
   if (p.id === "claude") {
     const m = await choose(
-      "Claude 등록 방식",
-      "OAuth: 사용량 (안정적)\nsessionKey: 사용량 + 초기화권\n\nOAuth 로 등록한 뒤 계정 화면에서 sessionKey 를 추가하는 것을 추천합니다.",
-      ["OAuth 로그인", "sessionKey 만 사용"]
+      "Claude 추가 방식",
+      "OAuth 로그인: 사용량을 안정적으로 가져와요.\nsessionKey: 사용량과 초기화권까지 가져와요.\n\nOAuth로 추가한 뒤 계정 화면에서 sessionKey를 더하는 걸 추천해요.",
+      ["OAuth 로그인 (추천)", "sessionKey로 추가"]
     )
     if (m < 0) return
     if (m === 1) {
       const key = await prompt("sessionKey", SESSION_KEY_HELP, { secure: true, placeholder: "sk-ant-..." })
       if (!key) return
       const acc = await api("POST", "/v1/accounts", { provider: "claude", session_key: key, label: label || undefined }, 60)
-      return alertMsg("완료", `${acc.label} 계정이 등록되었습니다.`)
+      return alertMsg("계정을 추가했어요", acc.label)
     }
   }
   await oauthLogin(p.id, { label })
@@ -2124,7 +2006,7 @@ function textW(text, size, weight = 400) {
 // 카드·상세 머리에 쓰는 글자들을 미리 잰다
 function measureItemsFor(acc, usage, nameSize, nameWeight) {
   const items = [{ text: acc.label, size: nameSize, weight: nameWeight }]
-  const plan = planLabel((usage && usage.plan) || acc.plan)
+  const plan = planLabel((usage && usage.plan) || acc.plan, acc.provider)
   if (plan) items.push({ text: plan, size: 10, weight: 700 })
   for (const pill of statusPills(usage || acc, { enabled: acc.enabled })) items.push({ text: pill.text, size: 11, weight: 600 })
   return items
@@ -2160,7 +2042,7 @@ function drawPills(ctx, pills, right, y, pal) {
 // 이름 바로 옆 플랜 배지(브랜드 색). name: { text, x, y, size, weight } — 이름을 그린 위치.
 // 이름 폭은 measureTexts 로 잰 값을 쓰고, 세로는 이름 줄(글자 크기 × 1.19)의 가운데에 맞춘다.
 function drawPlanBadge(ctx, provider, plan, name, maxRight) {
-  const label = planLabel(plan)
+  const label = planLabel(plan, provider)
   if (!label) return
   const h = 17
   const w = textW(label, 10, 700) + 12
@@ -2251,8 +2133,8 @@ function resetCreditImage(item, index, provider) {
   // 하루 이상 남으면 일 단위로만 (예: 4일 남음)
   const ms = item.expires_at ? new Date(item.expires_at).getTime() - Date.now() : null
   const left = fmtDuration(item.expires_at)
-  const leftText = ms == null ? "만료 없음" : ms >= D * 1000 ? `${Math.floor(ms / (D * 1000))}일 남음` : left ? `${left} 남음` : "곧 만료"
-  const soon = ms != null && ms < 3 * D * 1000
+  const leftText = ms == null ? "만료 없음" : ms >= DAY_MS ? `${Math.floor(ms / DAY_MS)}일 남음` : left ? `${left} 남음` : "곧 만료"
+  const soon = ms != null && ms < 3 * DAY_MS
   const right = drawPills(ctx, [soon ? { text: leftText, color: C.warn } : { text: leftText, muted: true }], W, 19, p)
   // 제목과 날짜
   const title = item.title || "사용량 초기화권"
@@ -2311,7 +2193,7 @@ async function accountDetail(accountId) {
 
     const detail = usage.error || (usage.warnings || []).join(" / ") || null
     const st = textRow(
-      `${STATUS_TEXT[usage.status] || usage.status}${usage.stale ? " · 이전 값 표시 중" : ""}  ·  ${fmtAgo(usage.fetched_at)} 조회`,
+      `${STATUS_TEXT[usage.status] || usage.status}${usage.stale ? " · 이전에 받은 값" : ""}  ·  ${fmtAgo(usage.fetched_at)} 확인`,
       detail,
       detail ? 64 : 44
     )
@@ -2334,16 +2216,16 @@ async function accountDetail(accountId) {
       if (items.length) {
         items.forEach((item, i) => table.addRow(imageRow(resetCreditImage(item, i, acc.provider), 70)))
       } else if (rc) {
-        table.addRow(textRow("사용 가능한 초기화권이 없습니다", "").row)
+        table.addRow(textRow("지금 쓸 수 있는 초기화권이 없어요", "").row)
       } else if (acc.provider === "claude" && !acc.auth.session_key) {
-        table.addRow(textRow("sessionKey 가 없어 조회하지 않음", "아래 'sessionKey 설정'으로 추가하세요.").row)
+        table.addRow(textRow("sessionKey 가 있어야 확인할 수 있어요", "아래 'sessionKey 설정'에서 추가할 수 있어요.").row)
       } else {
-        table.addRow(textRow("조회하지 못했습니다", usage.error || "").row)
+        table.addRow(textRow("확인하지 못했어요", usage.error || "").row)
       }
     }
 
     const { extra_usage: eu, credits: cr } = usage.extra || {}
-    if (eu) table.addRow(textRow("추가 사용량(Extra usage)", `${eu.used ?? "–"} / ${eu.limit ?? "–"} ${eu.currency || ""} (${fmtPct(eu.used_percent)})`, 50).row)
+    if (eu) table.addRow(textRow("추가 사용량", `${eu.used ?? "–"} / ${eu.limit ?? "–"} ${eu.currency || ""} (${fmtPct(eu.used_percent)})`, 50).row)
     else if (cr) table.addRow(textRow("크레딧", cr.unlimited ? "무제한" : `잔액 ${cr.balance ?? "–"}`, 50).row)
 
     table.addRow(headerRow("관리"))
@@ -2356,7 +2238,7 @@ async function accountDetail(accountId) {
 
     action("지금 새로고침", () => api("POST", `/v1/accounts/${accountId}/refresh`, undefined, 60))
     action("이름 변경", async () => {
-      const name = await prompt("이름 변경", "", { value: acc.label })
+      const name = await prompt("이름 변경", "위젯에 보일 새 이름을 적어 주세요.", { value: acc.label })
       if (name) await api("PATCH", `/v1/accounts/${accountId}`, { label: name })
     })
     if (acc.provider !== "claude" || acc.auth.oauth || usage.status === "needs_login") {
@@ -2368,28 +2250,28 @@ async function accountDetail(accountId) {
         if (key) await api("PATCH", `/v1/accounts/${accountId}`, { session_key: key }, 60)
       }
       if (!acc.auth.session_key) {
-        action("sessionKey 설정 (초기화권 표시)", setKey)
+        action("sessionKey 설정 (초기화권 보기)", setKey)
       } else {
         action("sessionKey 관리", async () => {
           // OAuth 가 없는 계정은 sessionKey 가 유일한 인증이라 제거할 수 없다
-          const opts = acc.auth.oauth ? ["교체", "제거"] : ["교체"]
-          const i = await choose("sessionKey", "초기화권 조회에 쓰는 claude.ai 쿠키입니다.", opts)
+          const opts = acc.auth.oauth ? ["새 값으로 바꾸기", "삭제"] : ["새 값으로 바꾸기"]
+          const i = await choose("sessionKey", "초기화권을 확인할 때 쓰는 claude.ai 쿠키예요.", opts)
           if (i === 0) await setKey()
-          if (i === 1 && (await confirm("sessionKey 제거", "초기화권 표시가 사라집니다.", "제거", true)))
+          if (i === 1 && (await confirm("sessionKey 삭제", "초기화권이 더 이상 표시되지 않아요.", "삭제", true)))
             await api("PATCH", `/v1/accounts/${accountId}`, { session_key: "" })
         })
       }
     }
-    action(acc.enabled ? "위젯에서 숨기기" : "위젯에 다시 표시", () =>
+    action(acc.enabled ? "위젯에서 숨기기" : "위젯에 다시 보이기", () =>
       api("PATCH", `/v1/accounts/${accountId}`, { enabled: !acc.enabled })
     )
     action(
       "계정 삭제",
       async () => {
-        if (await confirm("계정 삭제", `${acc.label} 계정과 저장된 로그인 정보를 ${getConfig().device ? "이 기기" : "서버"}에서 삭제합니다.`, "삭제", true)) {
+        if (await confirm("계정 삭제", `${acc.label} 계정과 로그인 정보를 ${getConfig().device ? "이 iPhone" : "서버"}에서 지울까요?`, "삭제", true)) {
           await api("DELETE", `/v1/accounts/${accountId}`)
           closed = true
-          await alertMsg("삭제됨", "닫기를 눌러 목록으로 돌아가세요.")
+          await alertMsg("삭제했어요", "이 화면을 닫으면 목록으로 돌아가요.")
         }
       },
       Color.red()
@@ -2407,50 +2289,47 @@ async function accountDetail(accountId) {
 // 자주 쓰지 않는 항목을 모은다. 화면을 다시 그려야 하면 true.
 async function settingsMenu() {
   const mode = getMode()
-  const modeName = mode === "device" ? "이 기기" : mode === "server" ? "서버" : "없음"
-  const items = [{
-    label: `연결 방식 바꾸기 (현재: ${isDemo() ? "데모" : modeName})`,
-    run: async () => {
-      const i = await choose("연결 방식", "서버와 기기 모드는 계정 목록을 따로 관리합니다.", ["서버에 연결", "이 기기에서 직접 조회 (서버 없음)"])
-      if (i === 0) await setupServer()
-      if (i === 1) await useDeviceMode()
+  const notify = notifySettings()
+  const items = [
+    {
+      label: `연결 방식: ${mode === "device" ? "이 iPhone" : "내 서버"}`,
+      run: () => chooseMode("연결 방식", "기기 모드와 서버 모드는 계정 목록을 따로 관리해요."),
     },
-  }]
-  if (mode === "server" && !isDemo()) items.push({ label: "서버 주소 / API 키 변경", run: () => setupServer() })
-  if (mode === "device" && !isDemo()) items.push({ label: `Antigravity 로그인 설정${agClient() ? " (입력됨)" : ""}`, run: () => setupAntigravityClient() })
+  ]
+  if (mode === "server") items.push({ label: "서버 주소·API 키 변경", run: () => setupServer() })
+  if (mode === "device") items.push({ label: `Antigravity 로그인 설정${agClient() ? " (입력됨)" : ""}`, run: () => setupAntigravityClient() })
+  items.push({ label: `알림: ${notify.enabled ? `켜짐 (${notify.threshold}% 이상)` : "꺼짐"}`, run: () => notifyMenu() })
   items.push({
-    label: `Claude 로고 바꾸기 (현재: ${claudeLogo() === "clawd" ? "Clawd" : "기본"})`,
+    label: `Claude 로고: ${claudeLogo() === "clawd" ? "Clawd" : "기본"}`,
     run: () => {
       setClaudeLogo(claudeLogo() === "clawd" ? "default" : "clawd")
       logoCache = {}
     },
   })
-  if (isDemo()) {
-    items.push({ label: "데모 데이터 초기화", run: () => demoReset() })
-    if (mode) items.push({ label: `데모 종료 (${modeName} 모드로)`, run: () => setDemo(false) })
-  } else {
-    items.push({ label: "데모 모드로 보기", run: () => setDemo(true) })
-  }
   const i = await choose("설정", `v${VERSION}`, items.map((x) => x.label))
   if (i < 0) return false
   await items[i].run()
   return true
 }
 
+async function notifyMenu() {
+  const cur = notifySettings()
+  const levels = [80, 90, 95]
+  const opts = [cur.enabled ? "알림 끄기" : "알림 켜기", ...levels.map((v) => `기준 ${v}%${cur.threshold === v ? " (지금)" : ""}`), "테스트 알림 보내기"]
+  const i = await choose(
+    "알림",
+    "사용량이 기준을 넘을 때, 그 한도가 초기화될 때, 다시 로그인해야 할 때, 초기화권 만료가 하루 안으로 다가왔을 때 알려 드려요.",
+    opts
+  )
+  if (i < 0) return
+  if (i === 0) saveNotifySettings({ ...cur, enabled: !cur.enabled })
+  else if (i <= levels.length) saveNotifySettings({ ...cur, enabled: true, threshold: levels[i - 1] })
+  else await sendNotification({ id: "aiusage-test", title: "AI 사용량", body: "알림이 이렇게 와요." })
+}
+
 // ───────────────────────── 앱 UI: 메인 ─────────────────────────
 async function mainMenu() {
-  if (!getConfig()) {
-    const i = await choose(
-      "처음 설정",
-      "직접 띄운 서버에 연결하거나, 서버 없이 이 기기에서 바로 조회할 수 있습니다. 가짜 데이터로 먼저 둘러볼 수도 있어요.",
-      ["서버에 연결", "이 기기에서 직접 조회 (서버 없음)", "데모 모드로 둘러보기"],
-      false
-    )
-    if (i === 0 && !(await setupServer())) return
-    if (i === 1) await useDeviceMode()
-    if (i === 2) setDemo(true)
-    if (i < 0) return
-  }
+  if (!getConfig() && !(await chooseMode("시작하기", "사용량을 어디서 가져올지 골라 주세요. 나중에 설정에서 바꿀 수 있어요."))) return
 
   const table = new UITable()
   table.showSeparators = true
@@ -2460,16 +2339,9 @@ async function mainMenu() {
     const head = new UITableRow()
     head.isHeader = true
     head.height = 60
-    const h = head.addText("AI 사용량", `${getConfig().server}  ·  v${VERSION}`)
+    const h = head.addText("AI 사용량", getConfig().server)
     h.titleFont = Font.boldSystemFont(22)
     table.addRow(head)
-
-    if (isDemo()) {
-      const { row, cell } = textRow("데모 모드", "가짜 데이터입니다. 설정에서 끌 수 있어요.")
-      row.backgroundColor = new Color("#FF9F0A", 0.15)
-      cell.titleColor = C.warn
-      table.addRow(row)
-    }
 
     let accounts = []
     let usage = {}
@@ -2478,19 +2350,20 @@ async function mainMenu() {
       const [acc, u] = await Promise.all([api("GET", "/v1/accounts"), loadUsage(refresh)])
       accounts = acc.accounts
       for (const a of u.data.accounts) usage[a.id] = a
-      if (u.offline) errorMsg = `오프라인(캐시 표시): ${u.error}`
+      if (u.offline) errorMsg = `마지막으로 받은 값을 보여 드려요. (${u.error})`
+      else await checkAlerts(u.data.accounts)
     } catch (e) {
       errorMsg = e.message
     }
 
     if (errorMsg) {
-      const { row, cell } = textRow(getConfig().device ? "불러오기 실패" : "서버 오류", errorMsg, 60)
+      const { row, cell } = textRow(getConfig().device ? "불러오지 못했어요" : "서버에 연결하지 못했어요", errorMsg, 60)
       cell.titleColor = Color.red()
       table.addRow(row)
     }
 
     table.addRow(headerRow(`계정 (${accounts.length})`))
-    if (!accounts.length && !errorMsg) table.addRow(textRow("등록된 계정이 없습니다", "아래 '계정 추가'를 눌러 시작하세요.").row)
+    if (!accounts.length && !errorMsg) table.addRow(textRow("아직 계정이 없어요", "아래 '계정 추가'로 시작해 보세요.").row)
 
     await measureTexts(accounts.flatMap((acc) => measureItemsFor(acc, usage[acc.id], 17, 600)))
     for (const acc of accounts) {

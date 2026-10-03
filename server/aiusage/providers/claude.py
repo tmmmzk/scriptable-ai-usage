@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import re
 import secrets
 import urllib.parse
 from typing import Any, Optional
@@ -41,6 +42,7 @@ SCOPES = [
     "user:file_upload",
 ]
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+PROFILE_URL = "https://api.anthropic.com/api/oauth/profile"
 WEB_BASE = "https://claude.ai/api"
 OAUTH_BETA = "oauth-2025-04-20"
 USER_AGENT = "claude-code/2.1.0"
@@ -50,13 +52,16 @@ WEB_USER_AGENT = (
 )
 REFRESH_MARGIN = 300
 
-# 알려진 사용량 창. 그 외 `utilization` 을 가진 블록도 자동으로 추가한다.
+# 표시할 사용량 창(Claude Code 의 /usage 와 같은 것만). 응답에는 내부 코드네임 블록
+# (예: iguana_necktie)도 섞여 오므로, 모르는 키는 보여주지 않는다.
 KNOWN_WINDOWS = [
-    ("five_hour", "session", "5시간", 5 * 3600, True),
-    ("seven_day", "weekly", "주간", 7 * 86400, True),
-    ("seven_day_opus", "weekly_opus", "Opus 주간", 7 * 86400, False),
-    ("seven_day_sonnet", "weekly_sonnet", "Sonnet 주간", 7 * 86400, False),
+    ("five_hour", "session", "현재 세션", 5 * 3600, True),
+    ("seven_day", "weekly", "이번 주", 7 * 86400, True),
+    ("seven_day_opus", "weekly_opus", "Opus 이번 주", 7 * 86400, False),
+    ("seven_day_sonnet", "weekly_sonnet", "Sonnet 이번 주", 7 * 86400, False),
 ]
+# /api/oauth/profile 의 organization_type → 플랜
+ORG_PLANS = {"claude_max": "max", "claude_pro": "pro", "claude_team": "team", "claude_enterprise": "enterprise"}
 MAX_RESET_CREDITS = 50
 
 
@@ -81,8 +86,8 @@ class ClaudeProvider(Provider):
         }
         return LoginStart(
             authorize_url=f"{AUTHORIZE_URL}?{urllib.parse.urlencode(params, quote_via=urllib.parse.quote)}",
-            instructions="Claude 계정으로 로그인해 승인하면 코드가 표시됩니다. 'Copy Code'로 복사해 붙여넣으세요.",
-            input_hint="code#state 형식의 코드",
+            instructions="Claude 계정으로 로그인해 승인하면 코드가 나와요. 'Copy Code'를 눌러 복사한 뒤 돌아오세요.",
+            input_hint="복사한 코드 (code#state 형식)",
             pending={"verifier": verifier, "state": state},
         )
 
@@ -111,7 +116,7 @@ class ClaudeProvider(Provider):
         creds = {"oauth": oauth}
         if org.get("uuid"):
             creds["org_id"] = org["uuid"]
-        return LoginResult(creds=creds, email=email)
+        return LoginResult(creds=creds, email=email, plan=self._fetch_plan(oauth["access_token"]))
 
     def create_manual(self, cfg: Config, payload: dict) -> LoginResult:
         session_key = (payload.get("session_key") or "").strip()
@@ -181,6 +186,9 @@ class ClaudeProvider(Provider):
             data, creds = self._fetch_oauth_usage(creds, save_creds)
             usage.windows = parse_windows(data)
             usage.extra = parse_extra_usage(data)
+            # 사용량 응답에는 플랜이 없어 프로필로 따로 조회(바뀔 일이 드물어 모를 때만)
+            if not account.get("plan"):
+                usage.plan = self._fetch_plan(creds["oauth"]["access_token"])
 
         if creds.get("session_key"):
             try:
@@ -200,6 +208,15 @@ class ClaudeProvider(Provider):
                 usage.extra = parse_extra_usage(web_data)
             usage.reset_credits = parse_reset_credits(web_data.get("cedar_ember"), now())
         return usage
+
+    @staticmethod
+    def _fetch_plan(access_token: str) -> Optional[str]:
+        """플랜 조회는 부가 정보라 실패해도 사용량 조회를 막지 않는다."""
+        try:
+            resp = http.request("GET", PROFILE_URL, headers={"Authorization": f"Bearer {access_token}", "User-Agent": USER_AGENT})
+            return parse_plan(resp.json()) if resp.ok else None
+        except ProviderError:
+            return None
 
     def _fetch_oauth_usage(self, creds: dict, save_creds: SaveCreds) -> tuple[dict, dict]:
         if (creds["oauth"].get("expires_at") or 0) - REFRESH_MARGIN < now():
@@ -277,10 +294,8 @@ class ClaudeProvider(Provider):
 # ---------- 정규화(순수 함수, 테스트 대상) ----------
 def parse_windows(data: dict) -> list[dict]:
     windows: list[dict] = []
-    seen = set()
     for src, key, label, seconds, primary in KNOWN_WINDOWS:
         block = data.get(src)
-        seen.add(src)
         if isinstance(block, dict) and block.get("utilization") is not None:
             windows.append(
                 make_window(
@@ -292,20 +307,35 @@ def parse_windows(data: dict) -> list[dict]:
                     primary=primary,
                 )
             )
-    for src, block in data.items():
-        if src in seen or src in ("extra_usage", "cedar_ember"):
+    # 모델별 주간 한도(예: Fable). limits[] 중 kind 가 weekly_scoped 인 것.
+    for item in data.get("limits") or []:
+        if not isinstance(item, dict) or item.get("kind") != "weekly_scoped":
             continue
-        if isinstance(block, dict) and block.get("utilization") is not None and "resets_at" in block:
-            windows.append(
-                make_window(
-                    src,
-                    src.replace("seven_day_", "주간 ").replace("_", " "),
-                    clamp_pct(to_float(block.get("utilization"))),
-                    iso(parse_iso(block.get("resets_at"))),
-                    window_seconds=7 * 86400 if src.startswith("seven_day") else None,
-                )
+        model = ((item.get("scope") or {}).get("model") or {}).get("display_name")
+        if not isinstance(model, str) or not model.strip():
+            continue
+        resets = item.get("resets_at")
+        windows.append(
+            make_window(
+                f"model:{model}",
+                f"{model} 이번 주",
+                clamp_pct(to_float(item.get("percent"))),
+                iso(float(resets)) if isinstance(resets, (int, float)) else iso(parse_iso(resets)),
+                window_seconds=7 * 86400,
             )
+        )
     return windows
+
+
+def parse_plan(profile: Any) -> Optional[str]:
+    """프로필 → 플랜. Max 는 rate_limit_tier 로 5x/20x 를 구분한다(예: default_claude_max_20x)."""
+    org = (profile or {}).get("organization") if isinstance(profile, dict) else None
+    if not isinstance(org, dict):
+        return None
+    tier = org.get("rate_limit_tier")
+    if isinstance(tier, str) and re.search(r"max_\d+x", tier):
+        return tier
+    return ORG_PLANS.get(org.get("organization_type"))
 
 
 def parse_extra_usage(data: dict) -> dict:

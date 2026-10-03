@@ -62,10 +62,10 @@ class AntigravityProvider(Provider):
         return LoginStart(
             authorize_url=f"{AUTH_URL}?{urllib.parse.urlencode(params, quote_via=urllib.parse.quote)}",
             instructions=(
-                "Antigravity 에서 쓰는 Google 계정으로 로그인하면 127.0.0.1 페이지로 이동하며 열리지 않습니다. "
-                "정상입니다. 주소창의 전체 URL을 복사해 붙여넣으세요."
+                "Antigravity에서 쓰는 Google 계정으로 로그인하면 열리지 않는 페이지로 이동해요. "
+                "정상이에요. 주소창의 주소를 통째로 복사한 뒤 돌아오세요."
             ),
-            input_hint="http://127.0.0.1:8585/callback?code=... 전체 URL",
+            input_hint="127.0.0.1:8585 로 시작하는 주소 전체",
             pending={"state": state, "redirect_uri": cfg.antigravity_redirect_uri},
         )
 

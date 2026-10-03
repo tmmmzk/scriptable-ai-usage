@@ -60,10 +60,10 @@ class CodexProvider(Provider):
         return LoginStart(
             authorize_url=f"{ISSUER}/oauth/authorize?{urllib.parse.urlencode(params, quote_via=urllib.parse.quote)}",
             instructions=(
-                "ChatGPT 계정으로 로그인하면 localhost 페이지로 이동하며 '연결할 수 없음'이 뜹니다. "
-                "정상입니다. 주소창의 전체 URL을 복사해 붙여넣으세요."
+                "ChatGPT 계정으로 로그인하면 '연결할 수 없음' 페이지가 떠요. "
+                "정상이에요. 주소창의 주소를 통째로 복사한 뒤 돌아오세요."
             ),
-            input_hint="http://localhost:1455/auth/callback?code=... 전체 URL",
+            input_hint="localhost:1455 로 시작하는 주소 전체",
             pending={"verifier": verifier, "state": state, "redirect_uri": cfg.codex_redirect_uri},
         )
 

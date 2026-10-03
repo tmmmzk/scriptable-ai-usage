@@ -46,6 +46,8 @@ class FakeUpstream:
                              "account": {"email_address": "me@example.com"}, "organization": {"uuid": "org-1"}})
             assert json_body["refresh_token"] == "c-rt-1"
             return resp({"access_token": "c-at-2", "refresh_token": "c-rt-2", "expires_in": 28800})
+        if url == "https://api.anthropic.com/api/oauth/profile":
+            return resp({"organization": {"organization_type": "claude_max", "rate_limit_tier": "default_claude_max_5x"}})
         if url == "https://api.anthropic.com/api/oauth/usage":
             assert hdrs["anthropic-beta"] == "oauth-2025-04-20"
             if self.claude_usage_status != 200:
@@ -146,6 +148,7 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(status, 200, acc)
         self.assertEqual(acc["label"], "개인")
         self.assertEqual(acc["email"], "me@example.com")
+        self.assertEqual(acc["plan"], "default_claude_max_5x")
         self.assertEqual(acc["status"], "ok")
         self.assertFalse(acc["auth"]["reset_credits_supported"])
 
