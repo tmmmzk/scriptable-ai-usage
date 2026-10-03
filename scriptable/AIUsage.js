@@ -429,9 +429,9 @@ function widgetSize(family) {
 }
 
 const LAYOUT = {
-  small: { pad: 14, accounts: 1, gap: 0 },
-  medium: { pad: 16, accounts: 2, gap: 14 },
-  large: { pad: 16, accounts: 4, gap: 16 },
+  small: { pad: 14, padV: 14, accounts: 1, gap: 0 },
+  medium: { pad: 16, padV: 11, accounts: 2, gap: 9 },
+  large: { pad: 16, padV: 14, accounts: 4, gap: 10 },
 }
 const CELL_GAP = 14
 
@@ -507,7 +507,7 @@ function addPill(stack, text, color) {
   pill.backgroundColor = C.pill
   pill.cornerRadius = 8
   pill.setPadding(2, 6, 2, 6)
-  addText(pill, text, Font.semiboldSystemFont(10.5), color || C.text)
+  addText(pill, text, Font.semiboldSystemFont(11), color || C.text)
   return pill
 }
 
@@ -515,16 +515,16 @@ function accountHeader(stack, acc, opts) {
   const row = stack.addStack()
   row.layoutHorizontally()
   row.centerAlignContent()
-  row.size = new Size(opts.width, 18)
+  row.size = new Size(opts.width, 20)
   const style = PROVIDER_STYLE[acc.provider] || { short: acc.provider }
   addLogo(row, acc.provider, opts.logo)
   row.addSpacer(6)
-  addText(row, acc.label || style.short, Font.semiboldSystemFont(14), C.text, {
+  addText(row, acc.label || style.short, Font.semiboldSystemFont(15), C.text, {
     opacity: opts.dim ? 0.55 : 1,
   })
   if (opts.showProvider) {
     row.addSpacer(6)
-    addText(row, style.short, Font.systemFont(11), C.sub)
+    addText(row, style.short, Font.systemFont(12), C.sub)
   }
   row.addSpacer()
   const rc = acc.reset_credits
@@ -555,23 +555,19 @@ function windowCell(parent, w, width, dim) {
   top.layoutHorizontally()
   top.bottomAlignContent()
   top.size = new Size(width, 0)
-  const until = fmtUntil(w.resets_at, true)
   // minimumScaleFactor 를 쓰면 줄마다 글자 크기가 달라지므로 쓰지 않는다
-  const title = windowTitle(w, true)
-  addText(top, title, Font.systemFont(11), C.sub)
+  addText(top, windowTitle(w, true), Font.systemFont(12), C.sub)
   top.addSpacer()
-  // 칸이 좁아 이름·시간·퍼센트가 다 안 들어가면 시간은 생략(잘리거나 겹치지 않게)
-  const fits = estWidth(title, 11) + estWidth(until, 11) + estWidth(fmtPct(w.used_percent), 12) + 18 <= width
-  if (until && fits) {
-    addText(top, until, Font.systemFont(11), C.sub, { opacity: 0.7 })
-    top.addSpacer(6)
-  }
   const pctColorFor = dim || w.used_percent == null || w.used_percent < 70 ? C.text : pctColor(w.used_percent)
-  addText(top, fmtPct(w.used_percent), Font.semiboldSystemFont(12), pctColorFor, { opacity: dim ? 0.55 : 1 })
+  addText(top, fmtPct(w.used_percent), Font.semiboldSystemFont(13), pctColorFor, { opacity: dim ? 0.55 : 1 })
 
-  cell.addSpacer(4)
+  cell.addSpacer(3)
   const bar = cell.addImage(barImage(w.used_percent, width, 6, dim ? C.sub : pctColor(w.used_percent)))
   bar.imageSize = new Size(width, 6)
+  // 남은 시간은 막대 아래 작은 글씨로
+  const until = fmtUntil(w.resets_at)
+  cell.addSpacer(2)
+  addText(cell, until ? `${until} 후 초기화` : " ", Font.systemFont(10), C.sub, { opacity: 0.85 })
   return cell
 }
 
@@ -595,12 +591,12 @@ function accountBlock(parent, acc, family, inner, extraPill) {
   if (family === "small") {
     // 소형: 폭이 좁아 두 한도를 위아래로
     ws.forEach((w, i) => {
-      block.addSpacer(i === 0 ? 6 : 10)
+      block.addSpacer(i === 0 ? 5 : 8)
       windowCell(block, w, inner, dim)
     })
     return block
   }
-  block.addSpacer(4)
+  block.addSpacer(3)
   const row = block.addStack()
   row.layoutHorizontally()
   const cellW = Math.floor((inner - CELL_GAP) / 2)
@@ -642,7 +638,7 @@ function buildHomeWidget(result, size, param) {
 
   const w = new ListWidget()
   w.backgroundColor = C.bg
-  w.setPadding(L.pad, L.pad, L.pad, L.pad)
+  w.setPadding(L.padV, L.pad, L.padV, L.pad)
 
   if (family === "large") {
     const head = w.addStack()
@@ -653,7 +649,7 @@ function buildHomeWidget(result, size, param) {
     head.addSpacer()
     addText(head, offline ? "오프라인 · " + fmtAgo(data.generated_at) : `${fmtAgo(data.generated_at)} 업데이트`,
       Font.systemFont(10), offline ? C.warn : C.sub)
-    w.addSpacer(12)
+    w.addSpacer(8)
   } else if (family === "medium") {
     w.addSpacer()
   }
@@ -667,9 +663,9 @@ function buildHomeWidget(result, size, param) {
   })
 
   w.addSpacer()
-  if (family === "small") {
-    const more = accounts.length > 1 ? `  ·  +${accounts.length - 1}개` : ""
-    addText(w, `${offline ? "오프라인 · " : ""}${fmtAgo(data.generated_at)} 업데이트${more}`, Font.systemFont(10), offline ? C.warn : C.sub)
+  if (family === "small" && offline) {
+    // 소형은 공간이 빠듯해 오프라인일 때만 알린다
+    addText(w, `오프라인 · ${fmtAgo(data.generated_at)}`, Font.systemFont(10), C.warn)
   } else if (family === "large" && accounts.length > shown.length) {
     addText(w, `+${accounts.length - shown.length}개 더 · 위젯 Parameter 로 계정을 고를 수 있어요`, Font.systemFont(10), C.sub)
   }
@@ -923,6 +919,45 @@ function estWidth(text, size) {
   return Math.ceil(w)
 }
 
+// ── 글자 폭 측정 (앱 전용) ──
+// DrawContext 는 글자 폭을 잴 수 없으므로, 보이지 않는 WebView 에서 같은 시스템 글꼴로 잰다.
+// 실패하면 estWidth 로 대신한다.
+const _textW = {}
+let _measureView = null
+const twKey = (text, size, weight) => `${weight}|${size}|${text}`
+
+async function measureTexts(items) {
+  const todo = items.filter((i) => i.text && !(twKey(i.text, i.size, i.weight) in _textW))
+  if (!todo.length) return
+  try {
+    if (!_measureView) {
+      _measureView = new WebView()
+      await _measureView.loadHTML("<html><body></body></html>")
+    }
+    const js = `(() => { const c = document.createElement("canvas").getContext("2d");
+      return JSON.stringify(${JSON.stringify(todo)}.map((i) => {
+        c.font = i.weight + " " + i.size + "px -apple-system, system-ui"; return c.measureText(i.text).width })) })()`
+    const widths = JSON.parse(await _measureView.evaluateJavaScript(js))
+    todo.forEach((i, k) => {
+      if (typeof widths[k] === "number" && widths[k] > 0) _textW[twKey(i.text, i.size, i.weight)] = widths[k]
+    })
+  } catch (e) {}
+}
+
+function textW(text, size, weight = 400) {
+  const v = _textW[twKey(text, size, weight)]
+  return v != null ? Math.ceil(v) : estWidth(text, size)
+}
+
+// 카드·상세 머리에 쓰는 글자들을 미리 잰다
+function measureItemsFor(acc, usage, nameSize, nameWeight) {
+  const items = [{ text: acc.label, size: nameSize, weight: nameWeight }]
+  const plan = planLabel((usage && usage.plan) || acc.plan)
+  if (plan) items.push({ text: plan, size: 10, weight: 700 })
+  for (const pill of accountPills(usage || acc, acc.enabled)) items.push({ text: pill.text, size: 11, weight: 600 })
+  return items
+}
+
 function newCtx(w, h) {
   const ctx = new DrawContext()
   ctx.size = new Size(w, h)
@@ -958,7 +993,7 @@ function drawLogo(ctx, provider, x, y, size, pal) {
 function drawPills(ctx, pills, right, y, pal) {
   let x = right
   for (const p of pills) {
-    const w = estWidth(p.text, 11) + 14
+    const w = textW(p.text, 11, 600) + 14
     x -= w
     fillRound(ctx, new Rect(x, y, w, 20), 10, pal.pill)
     drawTextAt(ctx, p.text, x, y + 3, w, 16, Font.semiboldSystemFont(11), p.color || pal.text, "center")
@@ -967,18 +1002,19 @@ function drawPills(ctx, pills, right, y, pal) {
   return x
 }
 
-// 부제 줄 맨 앞에 플랜 배지(브랜드 색). 배지 폭은 직접 정하므로 뒤 글자와 정확히 맞출 수 있다.
-// 그린 배지의 오른쪽 끝(다음 글자 시작 x)을 돌려준다. lineH 는 부제 글자 줄 높이.
-function drawPlanBadge(ctx, provider, plan, x, y, lineH) {
+// 이름 바로 옆 플랜 배지(브랜드 색). name: { text, x, y, size, weight } — 이름을 그린 위치.
+// 이름 폭은 measureTexts 로 잰 값을 쓰고, 세로는 이름 줄(글자 크기 × 1.19)의 가운데에 맞춘다.
+function drawPlanBadge(ctx, provider, plan, name, maxRight) {
   const label = planLabel(plan)
-  if (!label) return x
-  const h = 16
-  const w = estWidth(label, 10) + 12
-  const top = y + (lineH - h) / 2
+  if (!label) return
+  const h = 17
+  const w = textW(label, 10, 700) + 12
+  const x = name.x + textW(name.text, name.size, name.weight) + 7
+  if (x + w > maxRight) return
+  const top = name.y + (name.size * 1.19 - h) / 2 + 1
   const brand = (PROVIDER_STYLE[provider] || {}).color || "#8E8E93"
   fillRound(ctx, new Rect(x, top, w, h), 5, new Color(brand, pal().dark ? 0.28 : 0.15))
-  drawTextAt(ctx, label, x, top + 2, w, h - 2, Font.boldSystemFont(10), new Color(brand), "center")
-  return x + w + 6
+  drawTextAt(ctx, label, x, top + 2.5, w, h - 2, Font.boldSystemFont(10), new Color(brand), "center")
 }
 
 function accountPills(acc, enabled) {
@@ -998,36 +1034,31 @@ function pal() {
 }
 
 function drawBarCell(ctx, w, x, y, width, dim, p) {
-  const until = fmtUntil(w.resets_at, true)
   const pct = w.used_percent
   const color = dim || pct == null ? p.sub : pctColor(pct)
   const pctText = pct == null ? "–" : `${Math.round(pct)}%`
-  const pctW = Math.ceil(estWidth(pctText, 14) * 1.15)
-  const title = windowTitle(w, true)
-  drawTextAt(ctx, title, x, y + 3, width - pctW - 8, 16, Font.systemFont(12), p.sub)
-  drawTextAt(ctx, pctText, x + width - 60, y + 1, 60, 20, Font.semiboldSystemFont(14),
+  drawTextAt(ctx, windowTitle(w, true), x, y + 2, width - 56, 17, Font.systemFont(13), p.sub)
+  drawTextAt(ctx, pctText, x + width - 60, y, 60, 20, Font.semiboldSystemFont(15),
     dim || pct == null || pct < 70 ? p.text : pctColor(pct), "right")
-  // 남은 시간은 퍼센트 앞에 흐리게. 이름과 겹치면 생략(상세 화면에서 볼 수 있음)
-  if (until && estWidth(title, 12) + estWidth(until, 12) + pctW + 22 <= width) {
-    const end = x + width - pctW - 10
-    drawTextAt(ctx, until, end - 90, y + 3, 90, 16, Font.systemFont(12), new Color(p.sub.hex, 0.7), "right")
-  }
   fillRound(ctx, new Rect(x, y + 23, width, 7), 3.5, p.track)
   if (pct != null && pct > 0) fillRound(ctx, new Rect(x, y + 23, Math.max(7, (width * Math.min(100, pct)) / 100), 7), 3.5, color)
+  // 남은 시간은 막대 아래 작은 글씨로
+  const until = fmtUntil(w.resets_at)
+  if (until) drawTextAt(ctx, `${until} 후 초기화`, x, y + 33, width, 14, Font.systemFont(11), new Color(p.sub.hex, 0.85))
 }
 
 // 메인 화면의 계정 카드
 function accountCardImage(acc, enabled) {
   const p = pal()
   const W = cardWidth()
-  const H = 82
+  const H = 94
   const ctx = newCtx(W, H)
   const dim = acc.stale || acc.status === "needs_login"
   drawLogo(ctx, acc.provider, 0, 6, 24, p)
   const right = drawPills(ctx, accountPills(acc, enabled), W, 10, p)
   drawTextAt(ctx, acc.label, 34, 2, right - 40, 22, Font.semiboldSystemFont(17), dim ? p.sub : p.text)
-  const subX = drawPlanBadge(ctx, acc.provider, acc.plan, 34, 23, 16)
-  drawTextAt(ctx, providerLine(acc), subX, 23, right - subX - 6, 16, Font.systemFont(12), p.sub)
+  drawPlanBadge(ctx, acc.provider, acc.plan, { text: acc.label, x: 34, y: 2, size: 17, weight: 600 }, right - 6)
+  drawTextAt(ctx, providerLine(acc), 34, 23, right - 40, 16, Font.systemFont(12), p.sub)
   const ws = primaryWindows(acc)
   if (!ws.length) {
     drawTextAt(ctx, acc.error || STATUS_TEXT[acc.status] || "데이터 없음", 0, 46, W, 32, Font.systemFont(13), p.sub)
@@ -1063,8 +1094,8 @@ function detailHeaderImage(acc, usage) {
   drawLogo(ctx, acc.provider, 0, 8, 40, p)
   const right = drawPills(ctx, accountPills(usage, acc.enabled), W, 18, p)
   drawTextAt(ctx, acc.label, 52, 6, right - 56, 28, Font.boldSystemFont(22), p.text)
-  const subX = drawPlanBadge(ctx, acc.provider, usage.plan || acc.plan, 52, 37, 17)
-  drawTextAt(ctx, providerLine(acc), subX, 37, right - subX - 6, 17, Font.systemFont(13), p.sub)
+  drawPlanBadge(ctx, acc.provider, usage.plan || acc.plan, { text: acc.label, x: 52, y: 6, size: 22, weight: 700 }, right - 6)
+  drawTextAt(ctx, providerLine(acc), 52, 36, right - 56, 18, Font.systemFont(13), p.sub)
   return ctx.getImage()
 }
 
@@ -1112,6 +1143,7 @@ async function accountDetail(accountId) {
     const { account: acc, usage } = await api("GET", `/v1/accounts/${accountId}`)
     table.removeAllRows()
 
+    await measureTexts(measureItemsFor(acc, usage, 22, 700))
     table.addRow(imageRow(detailHeaderImage(acc, usage), 80))
 
     const st = new UITableRow()
@@ -1327,9 +1359,10 @@ async function mainMenu() {
       table.addRow(r)
     }
 
+    await measureTexts(accounts.flatMap((acc) => measureItemsFor(acc, usage[acc.id], 17, 600)))
     for (const acc of accounts) {
       const u = usage[acc.id] || { ...acc, windows: [] }
-      const r = imageRow(accountCardImage({ ...acc, ...u, label: acc.label }, acc.enabled), 102)
+      const r = imageRow(accountCardImage({ ...acc, ...u, label: acc.label }, acc.enabled), 114)
       r.dismissOnSelect = false
       r.onSelect = async () => {
         await accountDetail(acc.id)
