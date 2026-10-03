@@ -9,7 +9,7 @@
 // • 앱에서 실행하면 설정·계정 관리 화면이 열립니다.
 // • 위젯 Parameter 에 계정 이름(또는 id)을 쉼표로 적으면 그 계정만 표시합니다. 예) 개인,회사
 
-const VERSION = "0.5.0"
+const VERSION = "0.6.0"
 // 앱의 '업데이트'가 새 버전을 받아오는 주소(공개 저장소의 raw 파일). 포크했다면 여기를 바꾸세요.
 const UPDATE_URL = "https://raw.githubusercontent.com/tmmmzk/scriptable-ai-usage/main/scriptable/AIUsage.js"
 const KC_SERVER = "aiusage.server"
