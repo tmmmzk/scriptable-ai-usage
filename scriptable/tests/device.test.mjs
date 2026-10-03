@@ -241,6 +241,16 @@ await test("OAuth 만으로 초기화권(cedar_ember=1), 거부되면 옵션 없
   up.oauthCedar = null
 })
 
+await test("초기화권 대상이 아니면 0장, Code·Cowork 크레딧은 사용률이 없어도 표시", async () => {
+  up.oauthCedar = { eligible: false }
+  const e = await call("POST", `/v1/accounts/${claudeId}/refresh`)
+  assert.equal(e.reset_credits.available, 0)
+  assert.deepEqual(e.reset_credits.items, [])
+  up.oauthCedar = null
+  const ws = api.claudeWindows({ cinder_cove: { utilization: null, resets_at: "2099-02-01T00:00:00Z" } })
+  assert.deepEqual(ws.map((w) => [w.key, w.used_percent, w.kind]), [["cowork_credit", null, "credit"]])
+})
+
 await test("sessionKey 추가 → 초기화권(만료된 grant 제외, 한 장씩)", async () => {
   await call("PATCH", `/v1/accounts/${claudeId}`, { session_key: "sk-ant-sid" })
   const { usage } = await call("GET", `/v1/accounts/${claudeId}`)

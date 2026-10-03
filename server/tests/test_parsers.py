@@ -78,7 +78,10 @@ class ClaudeParserTest(unittest.TestCase):
         self.assertEqual(len(rc["items"]), 4)
         self.assertEqual(rc["items"][0]["expires_at"], "2026-10-04T00:00:00Z")
         self.assertNotIn("id", rc["items"][0])
-        self.assertIsNone(claude.parse_reset_credits({"eligible": False, "grants": []}, NOW))
+        none = claude.parse_reset_credits({"eligible": False, "grants": []}, NOW)
+        self.assertEqual((none["available"], none["items"]), (0, []))
+        cc = claude.parse_windows({"cinder_cove": {"utilization": None, "resets_at": "2099-02-01T00:00:00Z"}})
+        self.assertEqual([(w["key"], w["used_percent"], w["kind"]) for w in cc], [("cowork_credit", None, "credit")])
         self.assertIsNone(claude.parse_reset_credits(None, NOW))
 
 

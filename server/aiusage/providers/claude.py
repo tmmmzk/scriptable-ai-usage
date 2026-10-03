@@ -234,7 +234,13 @@ class ClaudeProvider(Provider):
             if not usage.windows:
                 usage.windows = parse_windows(web_data)
                 usage.extra = parse_extra_usage(web_data)
+            else:
+                # 웹 응답에만 오는 항목(예: Claude Code·Cowork 크레딧)은 더한다
+                have = {w["key"] for w in usage.windows}
+                usage.windows += [w for w in parse_windows(web_data) if w["key"] not in have]
             usage.reset_credits = parse_reset_credits(web_data.get("cedar_ember"), now())
+            if usage.reset_credits is None:
+                usage.warnings.append("claude.ai 응답에 초기화권 정보가 없습니다")
         return usage
 
     @staticmethod
@@ -361,7 +367,7 @@ def parse_windows(data: dict) -> list[dict]:
         )
     # Claude Code·Cowork 일회성 크레딧(cinder_cove). resets_at 은 만료 시각이다.
     cc = data.get("cinder_cove")
-    if isinstance(cc, dict) and cc.get("utilization") is not None:
+    if isinstance(cc, dict):
         w = make_window("cowork_credit", "Claude Code·Cowork 크레딧", clamp_pct(to_float(cc.get("utilization"))), iso(parse_iso(cc.get("resets_at"))))
         windows.append({**w, "kind": "credit"})
     return windows
@@ -406,11 +412,13 @@ def parse_extra_usage(data: dict) -> dict:
 def parse_reset_credits(block: Any, at: float) -> Optional[dict]:
     """`cedar_ember` 블록 → 사용 가능한 초기화권 목록.
 
-    eligible 이 아니면 None. 일시정지·소진·미시작·만료된 grant 는 제외하고,
+    블록이 없으면 None(모름), eligible 이 아니면 0장. 일시정지·소진·미시작·만료된 grant 는 제외하고,
     resets_left 가 2 이상이면 그 수만큼 펼친다.
     """
-    if not isinstance(block, dict) or block.get("eligible") is not True:
+    if not isinstance(block, dict):
         return None
+    if block.get("eligible") is not True:
+        return reset_credits_summary([])  # 대상이 아니면 0장(모르는 것과 구분)
     credits = []
     for grant in block.get("grants") or []:
         if not isinstance(grant, dict):
