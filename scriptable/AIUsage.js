@@ -9,7 +9,7 @@
 // • 앱에서 실행하면 설정·계정 관리 화면이 열립니다.
 // • 위젯 Parameter 에 계정 이름(또는 id)을 쉼표로 적으면 그 계정만 표시합니다. 예) 개인,회사
 
-const VERSION = "0.2.0"
+const VERSION = "0.3.0"
 const KC_SERVER = "aiusage.server"
 const KC_KEY = "aiusage.apikey"
 const CACHE_FILE = "aiusage-cache.json"
@@ -39,7 +39,7 @@ const C = {
 
 // ───────────────────────── 설정 / API ─────────────────────────
 function getConfig() {
-  if (getMode() === "device") return { server: "이 iPhone에서 직접 확인", device: true }
+  if (getMode() === "device") return { device: true }
   const server = Keychain.contains(KC_SERVER) ? Keychain.get(KC_SERVER) : null
   const apiKey = Keychain.contains(KC_KEY) ? Keychain.get(KC_KEY) : null
   return server && apiKey ? { server, apiKey } : null
@@ -1204,8 +1204,13 @@ async function deviceApi(method, path, body) {
 
 async function api(method, path, body, timeout = 25) {
   const cfg = getConfig()
-  if (!cfg) throw new ApiError("서버 설정이 필요합니다.", 0)
+  if (!cfg) throw new ApiError("연결 방식을 먼저 정해 주세요.", 0)
   if (cfg.device) return deviceApi(method, path, body || {})
+  return serverApi(cfg, method, path, body, timeout)
+}
+
+// 저장 전에 연결을 확인할 때도 쓰므로 설정을 인자로 받는다.
+async function serverApi(cfg, method, path, body, timeout = 25) {
   const req = new Request(cfg.server.replace(/\/+$/, "") + path)
   req.method = method
   req.timeoutInterval = timeout
@@ -1218,7 +1223,7 @@ async function api(method, path, body, timeout = 25) {
   try {
     data = await req.loadJSON()
   } catch (e) {
-    throw new ApiError(`서버에 연결할 수 없습니다: ${e.message || e}`, 0)
+    throw new ApiError(`서버에 연결하지 못했어요: ${e.message || e}`, 0)
   }
   const status = req.response ? req.response.statusCode : 0
   if (status >= 400) throw new ApiError((data && data.error) || `HTTP ${status}`, status)
@@ -1702,14 +1707,25 @@ async function runWidget() {
 }
 
 // ───────────────────────── 알림 ─────────────────────────
-// 위젯·앱이 사용량을 받을 때마다 확인해, 필요한 알림을 한 번씩만 보낸다(보낸 기록은 파일에 둔다).
+// 위젯·앱이 사용량을 받을 때마다 확인해, 필요한 알림을 한 번씩만 보낸다.
+// 보낸 기록(sent)과 한도별 직전 값(seen)은 파일에 둔다. seen 으로 예정보다 이른 초기화를 알아챈다.
 const KC_NOTIFY = "aiusage.notify"
 const NOTIFY_STATE_FILE = "aiusage-notify-state.json"
+const NOTIFY_KEEP_MS = 14 * DAY_MS
+
+const NOTIFY_TYPES = [
+  { key: "high", title: "사용량 경고", desc: "대표 한도가 기준을 넘었을 때" },
+  { key: "reset", title: "초기화 알림", desc: "기준을 넘긴 한도가 예정 시각에 초기화될 때" },
+  { key: "early", title: "조기 초기화 감지", desc: "예정보다 일찍 한도가 초기화됐을 때" },
+  { key: "login", title: "재로그인 필요", desc: "로그인이 만료돼 사용량을 못 가져올 때" },
+  { key: "credit", title: "초기화권 만료 임박", desc: "초기화권이 하루 안에 만료될 때" },
+]
 
 function notifySettings() {
-  const base = { enabled: true, threshold: 90 }
+  const base = { enabled: true, threshold: 90, types: Object.fromEntries(NOTIFY_TYPES.map((t) => [t.key, true])) }
   try {
-    return { ...base, ...JSON.parse(Keychain.contains(KC_NOTIFY) ? Keychain.get(KC_NOTIFY) : "{}") }
+    const saved = JSON.parse(Keychain.contains(KC_NOTIFY) ? Keychain.get(KC_NOTIFY) : "{}")
+    return { ...base, ...saved, types: { ...base.types, ...(saved.types || {}) } }
   } catch (e) {
     return base
   }
@@ -1731,41 +1747,68 @@ async function sendNotification({ id, title, body, at }) {
   await n.schedule()
 }
 
+// 예정 초기화 시각 전에 사용률이 10%p 넘게 떨어졌으면 조기 초기화로 본다
+function isEarlyReset(prev, w, now) {
+  const due = msOf(prev.resets_at)
+  if (!due || now >= due - 60 * 1000) return false // 예정 시각이 지났으면 정상 초기화
+  if (prev.used == null || w.used_percent == null) return false
+  return prev.used >= 10 && w.used_percent <= prev.used - 10
+}
+
 async function checkAlerts(accounts) {
   const settings = notifySettings()
-  if (!settings.enabled) return
+  const on = (type) => settings.enabled && settings.types[type]
   const now = Date.now()
-  const sent = readJSON(NOTIFY_STATE_FILE, {})
+  const state = readJSON(NOTIFY_STATE_FILE, {})
+  // 예전 형식({키: 시각})도 보낸 기록으로 이어받는다
+  const sent = state.sent || (state.seen ? {} : state)
+  const seen = state.seen || {}
   const once = (key) => !sent[key] && (sent[key] = now)
   const jobs = []
+  const cancel = []
   for (const acc of accounts) {
     const who = `${providerName(acc.provider)} · ${acc.label}`
     if (acc.status === "needs_login") {
-      if (once(`login:${acc.id}:${acc.last_success_at}`))
+      if (on("login") && once(`login:${acc.id}:${acc.last_success_at}`))
         jobs.push({ id: `aiusage-login-${acc.id}`, title: who, body: "다시 로그인해야 사용량을 가져올 수 있어요. 눌러서 열어 주세요." })
       continue
     }
-    if (acc.stale) continue
+    if (acc.stale) continue // 이전 값이면 비교하지 않는다
+    for (const w of acc.windows || []) {
+      const key = `${acc.id}:${w.key}`
+      const prev = seen[key]
+      if (prev && isEarlyReset(prev, w, now)) {
+        cancel.push(`aiusage-reset-${acc.id}-${w.key}`) // 예약해 둔 초기화 알림은 필요 없어졌다
+        if (on("early") && once(`early:${key}:${prev.resets_at}`))
+          jobs.push({ id: `aiusage-early-${acc.id}-${w.key}`, title: who,
+            body: `${windowTitle(w)} 한도가 예정보다 일찍 초기화됐어요. (${Math.round(prev.used)}% → ${Math.round(w.used_percent)}%)` })
+      }
+      seen[key] = { used: w.used_percent, resets_at: w.resets_at, at: now }
+    }
     for (const w of primaryWindows(acc)) {
       if (w.used_percent == null || w.used_percent < settings.threshold) continue
       const name = windowTitle(w)
       const period = `${acc.id}:${w.key}:${w.resets_at}`
-      if (once(`high:${period}`))
+      if (on("high") && once(`high:${period}`))
         jobs.push({ id: `aiusage-high-${acc.id}-${w.key}`, title: who,
           body: `${name} 사용량이 ${Math.round(w.used_percent)}%예요.${w.resets_at ? ` ${resetText(w.resets_at)}돼요.` : ""}` })
       const at = msOf(w.resets_at)
-      if (at && at > now && once(`reset:${period}`))
+      if (on("reset") && at && at > now && once(`reset:${period}`))
         jobs.push({ id: `aiusage-reset-${acc.id}-${w.key}`, title: who, body: `${name} 한도가 초기화됐어요. 다시 쓸 수 있어요.`, at: new Date(at) })
     }
     for (const item of (acc.reset_credits && acc.reset_credits.items) || []) {
       const exp = msOf(item.expires_at)
-      if (exp && exp > now && exp - now < DAY_MS && once(`credit:${acc.id}:${item.expires_at}`))
+      if (on("credit") && exp && exp > now && exp - now < DAY_MS && once(`credit:${acc.id}:${item.expires_at}`))
         jobs.push({ id: `aiusage-credit-${acc.id}-${exp}`, title: who,
           body: `초기화권 1장이 ${fmtDuration(item.expires_at)} 뒤에 만료돼요. 필요하면 그 전에 쓰세요.` })
     }
   }
-  for (const [key, t] of Object.entries(sent)) if (now - t > 14 * DAY_MS) delete sent[key] // 2주 지난 기록 정리
-  writeJSON(NOTIFY_STATE_FILE, sent)
+  for (const [key, t] of Object.entries(sent)) if (now - t > NOTIFY_KEEP_MS) delete sent[key]
+  for (const [key, v] of Object.entries(seen)) if (now - v.at > NOTIFY_KEEP_MS) delete seen[key]
+  writeJSON(NOTIFY_STATE_FILE, { sent, seen })
+  try {
+    if (cancel.length) await Notification.removePending(cancel)
+  } catch (e) {}
   for (const job of jobs) {
     try {
       await sendNotification(job)
@@ -1774,14 +1817,6 @@ async function checkAlerts(accounts) {
 }
 
 // ───────────────────────── 앱 UI: 공용 ─────────────────────────
-async function alertMsg(title, message) {
-  const a = new Alert()
-  a.title = title
-  a.message = message || ""
-  a.addAction("확인")
-  await a.presentAlert()
-}
-
 async function confirm(title, message, okText = "확인", destructive = false) {
   const a = new Alert()
   a.title = title
@@ -1789,16 +1824,6 @@ async function confirm(title, message, okText = "확인", destructive = false) {
   destructive ? a.addDestructiveAction(okText) : a.addAction(okText)
   a.addCancelAction("취소")
   return (await a.presentAlert()) === 0
-}
-
-async function choose(title, message, options, sheet = true) {
-  const a = new Alert()
-  a.title = title
-  if (message) a.message = message
-  options.forEach((o) => a.addAction(o))
-  a.addCancelAction("취소")
-  const i = sheet ? await a.presentSheet() : await a.presentAlert()
-  return i
 }
 
 async function prompt(title, message, { placeholder = "", value = "", secure = false, ok = "확인" } = {}) {
@@ -1812,139 +1837,301 @@ async function prompt(title, message, { placeholder = "", value = "", secure = f
   return a.textFieldValue(0).trim()
 }
 
-async function guarded(fn) {
-  try {
-    return await fn()
-  } catch (e) {
-    await alertMsg("오류", e.message || String(e))
-    return undefined
+// ───────────────────────── 앱 UI: 페이지 ─────────────────────────
+// 설정·입력도 팝업 대신 메인처럼 '페이지'(표)로 보여준다. 글자를 직접 쳐야 할 때만 작은 입력창을 띄운다.
+// build(page) 가 행을 채운다. 행을 누르면 page.run(fn) 이 작업하고 페이지를 다시 그린다(오류는 맨 위에 표시).
+const ACCENT = new Color("#0A84FF")
+
+async function openPage(title, build) {
+  const table = new UITable()
+  table.showSeparators = true
+  const page = {
+    closed: false,
+    notice: null, // 맨 위에 보여줄 결과·오류 { title, detail, color }
+    add: (row) => table.addRow(row),
+    async render() {
+      if (this.closed) return
+      table.removeAllRows()
+      if (title) table.addRow(titleRow(title))
+      if (this.notice) table.addRow(noticeRow(this.notice))
+      try {
+        await build(this)
+      } catch (e) {
+        table.addRow(noticeRow({ title: "불러오지 못했어요", detail: e.message || String(e), color: C.bad }))
+      }
+      table.reload()
+    },
+    run(fn) {
+      return async () => {
+        this.notice = null
+        try {
+          await fn()
+        } catch (e) {
+          this.notice = { title: "문제가 생겼어요", detail: e.message || String(e), color: C.bad }
+        }
+        await this.render()
+      }
+    },
   }
+  await page.render()
+  await table.present(false)
+  page.closed = true
+  return page
+}
+
+function titleRow(text) {
+  const r = new UITableRow()
+  r.isHeader = true
+  r.height = 56
+  r.addText(text).titleFont = Font.boldSystemFont(24)
+  return r
+}
+
+function noticeRow({ title, detail, color }) {
+  const { row, cell } = textRow(title, detail || null, detail ? 64 : 48)
+  cell.titleColor = color || Color.gray()
+  cell.subtitleColor = Color.gray()
+  return row
+}
+
+// 회색 안내 문구. 줄 수에 맞춰 높이를 잡는다.
+function noteRow(text) {
+  const r = new UITableRow()
+  const perLine = Math.max(10, cardWidth() - 10)
+  const lines = String(text).split("\n").reduce((n, l) => n + Math.max(1, Math.ceil(estWidth(l, 13) / perLine)), 0)
+  r.height = Math.max(44, lines * 18 + 18)
+  const c = r.addText(text)
+  c.titleFont = Font.systemFont(13)
+  c.titleColor = Color.gray()
+  return r
+}
+
+// 왼쪽 제목(+설명), 오른쪽 값. iOS 설정 앱의 한 줄처럼 쓴다.
+function valueRow(title, value, onSelect, { subtitle, color, valueWidth = 42 } = {}) {
+  const r = new UITableRow()
+  r.dismissOnSelect = false
+  r.height = subtitle ? 62 : 48
+  const t = r.addText(title, subtitle || null)
+  t.widthWeight = 100 - valueWidth
+  if (subtitle) {
+    t.subtitleColor = Color.gray()
+    t.subtitleFont = Font.systemFont(12)
+  }
+  const v = r.addText(value == null ? "" : String(value))
+  v.widthWeight = valueWidth
+  v.rightAligned()
+  v.titleColor = color || Color.gray()
+  if (onSelect) r.onSelect = onSelect
+  return r
+}
+
+const toggleRow = (title, on, onSelect, subtitle) =>
+  valueRow(title, on ? "켜짐" : "꺼짐", onSelect, { subtitle, color: on ? C.ok : Color.gray(), valueWidth: 20 })
+const checkRow = (title, checked, onSelect, subtitle) =>
+  valueRow(title, checked ? "✓" : "", onSelect, { subtitle, color: ACCENT, valueWidth: 12 })
+const linkRow = (title, onSelect, subtitle) => valueRow(title, "›", onSelect, { subtitle, valueWidth: 12 })
+
+function providerRow(provider, title, subtitle, onSelect) {
+  const r = new UITableRow()
+  r.dismissOnSelect = false
+  r.height = 62
+  const img = logoImage(provider, pal().dark)
+  if (img) r.addImage(img).widthWeight = 12
+  const t = r.addText(title, subtitle)
+  t.widthWeight = 80
+  t.subtitleColor = Color.gray()
+  const v = r.addText("›")
+  v.widthWeight = 8
+  v.rightAligned()
+  v.titleColor = Color.gray()
+  r.onSelect = onSelect
+  return r
 }
 
 // ───────────────────────── 앱 UI: 연결 설정 ─────────────────────────
-async function setupServer() {
-  const cfg = getConfig()
-  const cur = cfg && !cfg.device ? cfg : {}
-  const server = await prompt("서버 주소", "직접 띄운 사용량 서버의 주소예요.\n예) https://ai.example.com", {
-    placeholder: "https://",
-    value: cur.server || "",
-  })
-  if (!server) return false
-  const key = await prompt("API 키", "서버에 설정한 AIUSAGE_API_KEY 값이에요.", { secure: true, value: cur.apiKey || "" })
-  if (!key) return false
-  Keychain.set(KC_SERVER, server.replace(/\/+$/, ""))
-  Keychain.set(KC_KEY, key)
-  setMode("server")
-  try {
-    await api("GET", "/v1/accounts")
-    await alertMsg("연결됐어요", "이제 서버에 등록된 계정을 보여 드려요.")
-    return true
-  } catch (e) {
-    await alertMsg("연결하지 못했어요", `${e.message}\n\n입력한 값은 저장해 뒀어요. 주소와 키를 다시 확인해 주세요.`)
-    return false
+async function serverPage() {
+  // 저장 전 값은 페이지 안에만 두고, 연결이 확인되면 저장한다
+  const draft = {
+    server: Keychain.contains(KC_SERVER) ? Keychain.get(KC_SERVER) : "",
+    apiKey: Keychain.contains(KC_KEY) ? Keychain.get(KC_KEY) : "",
   }
-}
-
-async function useDeviceMode() {
-  setMode("device")
-  await alertMsg(
-    "기기 모드",
-    "서버 없이 이 iPhone에서 바로 사용량을 가져와요.\n로그인 정보는 iOS 키체인에 보관하고, 계정 목록은 서버 모드와 따로 관리해요.\n\n'계정 추가'로 시작해 보세요."
-  )
-  return true
-}
-
-// 처음 실행할 때와 설정에서 쓰는 연결 방식 선택. 바꿨으면 true.
-async function chooseMode(title, message) {
-  const i = await choose(title, message, ["이 iPhone에서 직접 (서버 없이)", "내 서버에 연결"], false)
-  if (i === 0) return useDeviceMode()
-  if (i === 1) return setupServer()
-  return false
+  let connected = false
+  await openPage("서버 연결", async (page) => {
+    page.add(noteRow("직접 띄운 사용량 서버에 연결해요. 서버를 설치하는 방법은 저장소의 README에 있어요."))
+    page.add(headerRow("서버"))
+    page.add(valueRow("주소", draft.server || "입력", page.run(async () => {
+      const v = await prompt("서버 주소", "예) https://ai.example.com", { value: draft.server, placeholder: "https://" })
+      if (v != null) draft.server = v.replace(/\/+$/, "")
+    }), { valueWidth: 60 }))
+    page.add(valueRow("API 키", draft.apiKey ? "입력됨" : "입력", page.run(async () => {
+      const v = await prompt("API 키", "서버에 설정한 AIUSAGE_API_KEY 값이에요.", { secure: true, value: draft.apiKey })
+      if (v != null) draft.apiKey = v
+    })))
+    page.add(actionRow("연결 확인하고 저장", page.run(async () => {
+      if (!draft.server || !draft.apiKey) throw new Error("주소와 API 키를 모두 넣어 주세요.")
+      await serverApi(draft, "GET", "/v1/accounts")
+      Keychain.set(KC_SERVER, draft.server)
+      Keychain.set(KC_KEY, draft.apiKey)
+      setMode("server")
+      connected = true
+      page.notice = { title: "연결됐어요", detail: "이 화면을 닫으면 서버의 계정 목록을 보여 드려요.", color: C.ok }
+    }), ACCENT))
+  })
+  return connected
 }
 
 const AG_CLIENT_HELP =
-  "PC에 설치한 Antigravity 앱의 resources/app/out/main.js 파일에서 두 값을 찾아 넣어 주세요.\n\n• Client ID: ….apps.googleusercontent.com 으로 끝나는 값\n• Client Secret: GOCSPX- 로 시작하는 값"
+  "PC에 설치한 Antigravity 앱의 resources/app/out/main.js 파일에서 두 값을 찾아 넣어 주세요.\n• Client ID: ….apps.googleusercontent.com 으로 끝나는 값\n• Client Secret: GOCSPX- 로 시작하는 값"
 
-async function setupAntigravityClient() {
-  const cur = agClient() || {}
-  const id = await prompt("Antigravity Client ID", AG_CLIENT_HELP, { value: cur.id || "", placeholder: "….apps.googleusercontent.com" })
-  if (!id) return false
-  const secret = await prompt("Antigravity Client Secret", "GOCSPX- 로 시작하는 값이에요.", { secure: true, value: cur.secret || "", placeholder: "GOCSPX-…" })
-  if (!secret) return false
-  Keychain.set(KC_AG_CLIENT, JSON.stringify({ id, secret }))
-  await alertMsg("저장했어요", "이제 Antigravity 계정을 추가할 수 있어요.")
-  return true
+async function antigravityPage() {
+  await openPage("Antigravity 로그인 설정", async (page) => {
+    let cur = {}
+    try {
+      cur = JSON.parse(Keychain.contains(KC_AG_CLIENT) ? Keychain.get(KC_AG_CLIENT) : "{}") || {}
+    } catch (e) {}
+    const save = (patch) => Keychain.set(KC_AG_CLIENT, JSON.stringify({ ...cur, ...patch }))
+    page.add(noteRow(AG_CLIENT_HELP))
+    page.add(headerRow("Google OAuth 클라이언트"))
+    page.add(valueRow("Client ID", cur.id ? `${cur.id.slice(0, 12)}…` : "입력", page.run(async () => {
+      const v = await prompt("Client ID", "….apps.googleusercontent.com 으로 끝나는 값이에요.", { value: cur.id || "" })
+      if (v != null) save({ id: v })
+    })))
+    page.add(valueRow("Client Secret", cur.secret ? "입력됨" : "입력", page.run(async () => {
+      const v = await prompt("Client Secret", "GOCSPX- 로 시작하는 값이에요.", { secure: true, value: cur.secret || "" })
+      if (v != null) save({ secret: v })
+    })))
+    if (agClient()) page.add(noticeRow({ title: "준비됐어요", detail: "이제 Antigravity 계정을 추가할 수 있어요.", color: C.ok }))
+  })
+  return !!agClient()
 }
 
-// ───────────────────────── 앱 UI: 로그인 ─────────────────────────
-async function oauthLogin(provider, { label, accountId } = {}) {
-  const start = await api("POST", "/v1/logins", { provider, label: label || undefined, account_id: accountId })
-  if (!(await confirm(`${providerName(provider)} 로그인`, `${start.instructions}\n\n로그인 페이지를 열까요?`, "로그인 페이지 열기"))) return null
-  Safari.open(start.authorize_url)
+// ───────────────────────── 앱 UI: 계정 추가·로그인 ─────────────────────────
+const PROVIDER_DESC = { claude: "사용량 · 초기화권 · 플랜", codex: "사용량 · 초기화권 · 플랜", antigravity: "모델 그룹별 사용량" }
 
-  while (true) {
-    const a = new Alert()
-    a.title = "복사한 값 붙여넣기"
-    a.message = `${start.input_hint}\n\n복사해 왔다면 '붙여넣기'를 누르세요.`
-    a.addAction("붙여넣기")
-    a.addAction("직접 입력")
-    a.addAction("로그인 페이지 다시 열기")
-    a.addCancelAction("취소")
-    const i = await a.presentAlert()
-    if (i === -1) return null
-    if (i === 2) {
-      Safari.open(start.authorize_url)
-      continue
-    }
-    const input = i === 0 ? (Pasteboard.paste() || "").trim() : await prompt("직접 입력", start.input_hint)
-    if (input === null) continue
-    if (!input) {
-      await alertMsg("클립보드가 비어 있어요", "복사가 안 된 것 같아요. 로그인 페이지에서 다시 복사해 주세요.")
-      continue
-    }
-    try {
-      const acc = await api("POST", `/v1/logins/${start.login_id}/complete`, { input }, 60)
-      const status = acc.status === "ok" ? "" : `\n\n상태: ${STATUS_TEXT[acc.status] || acc.status}`
-      await alertMsg(accountId ? "다시 로그인했어요" : "계정을 추가했어요", `${acc.label}${acc.email ? ` (${acc.email})` : ""}${status}`)
-      return acc
-    } catch (e) {
-      if (!(await confirm("로그인하지 못했어요", `${e.message}\n\n다시 붙여넣을까요?`, "다시 시도"))) return null
-    }
-  }
+const LOGIN_GUIDE = {
+  claude: "로그인하고 승인하면 코드가 나와요. 'Copy Code'로 복사한 뒤 돌아와서 '붙여넣기'를 누르세요.",
+  codex: "ChatGPT로 로그인하면 '연결할 수 없음' 페이지가 떠요. 정상이에요. 주소창의 주소를 통째로 복사한 뒤 돌아와서 '붙여넣기'를 누르세요.",
+  antigravity: "Antigravity에서 쓰는 Google 계정으로 로그인하면 열리지 않는 페이지로 이동해요. 정상이에요. 주소창의 주소를 통째로 복사한 뒤 돌아와서 '붙여넣기'를 누르세요.",
 }
 
 const SESSION_KEY_HELP =
-  "초기화권은 claude.ai 웹에서만 확인할 수 있어서 sessionKey 가 필요해요.\n\nPC 브라우저로 claude.ai 에 로그인한 뒤 개발자 도구 → Application → Cookies → https://claude.ai 에서 'sessionKey' 값(sk-ant-…)을 복사해 주세요."
+  "초기화권은 claude.ai 웹에서만 확인할 수 있어서 sessionKey가 필요해요. PC 브라우저로 claude.ai에 로그인한 뒤 개발자 도구 → Application → Cookies → https://claude.ai 에서 'sessionKey' 값(sk-ant-…)을 복사해 주세요."
 
-async function addAccount() {
-  const { providers } = await api("GET", "/v1/providers")
-  const labels = providers.map((p) => (p.configured ? p.name : `${p.name} (설정 필요)`))
-  const i = await choose("계정 추가", "어떤 서비스를 추가할까요?", labels)
-  if (i < 0) return
-  const p = providers[i]
-  if (!p.configured) {
-    if (!getConfig().device || p.id !== "antigravity") return alertMsg("설정이 필요해요", p.reason)
-    if (!(await setupAntigravityClient())) return
+async function addAccountPage() {
+  let added = false
+  await openPage("계정 추가", async (page) => {
+    const { providers } = await api("GET", "/v1/providers")
+    page.add(headerRow("어떤 서비스를 추가할까요?"))
+    for (const p of providers) {
+      page.add(providerRow(p.id, p.name, p.configured ? PROVIDER_DESC[p.id] || "" : "설정이 필요해요", page.run(async () => {
+        if (!p.configured) {
+          if (!(getConfig().device && p.id === "antigravity")) throw new Error(p.reason)
+          if (!(await antigravityPage())) return
+        }
+        if (await loginPage(p.id)) {
+          added = true
+          page.notice = { title: "계정을 추가했어요", detail: "이 화면을 닫으면 목록에 보여요.", color: C.ok }
+        }
+      })))
+    }
+  })
+  return added
+}
+
+// 새 계정 추가 또는 기존 계정 다시 로그인(accountId). 끝나면 결과를 페이지 맨 위에 보여준다.
+async function loginPage(provider, { accountId = null } = {}) {
+  const st = { label: "", method: "oauth", login: null, done: null }
+
+  const finish = (page, acc) => {
+    st.done = acc
+    const status = acc.status === "ok" ? "" : ` · 상태: ${STATUS_TEXT[acc.status] || acc.status}`
+    page.notice = { title: accountId ? "다시 로그인했어요" : "계정을 추가했어요",
+      detail: `${acc.label}${acc.email ? ` (${acc.email})` : ""}${status} · 닫으면 목록으로 돌아가요.`, color: C.ok }
   }
 
-  const label = await prompt("이름", "위젯에 보일 이름이에요. 비워 두면 이메일 앞부분을 써요.", { placeholder: "예) 개인" })
-  if (label === null) return
-
-  if (p.id === "claude") {
-    const m = await choose(
-      "Claude 추가 방식",
-      "OAuth 로그인: 사용량을 안정적으로 가져와요.\nsessionKey: 사용량과 초기화권까지 가져와요.\n\nOAuth로 추가한 뒤 계정 화면에서 sessionKey를 더하는 걸 추천해요.",
-      ["OAuth 로그인 (추천)", "sessionKey로 추가"]
-    )
-    if (m < 0) return
-    if (m === 1) {
-      const key = await prompt("sessionKey", SESSION_KEY_HELP, { secure: true, placeholder: "sk-ant-..." })
-      if (!key) return
-      const acc = await api("POST", "/v1/accounts", { provider: "claude", session_key: key, label: label || undefined }, 60)
-      return alertMsg("계정을 추가했어요", acc.label)
+  const submitCode = async (page, raw) => {
+    if (raw == null) return
+    if (!st.login) throw new Error("먼저 '1. 로그인 페이지 열기'로 로그인해 주세요.")
+    const input = String(raw).trim()
+    if (!input) throw new Error("클립보드가 비어 있어요. 로그인 페이지에서 다시 복사해 주세요.")
+    try {
+      finish(page, await api("POST", `/v1/logins/${st.login.login_id}/complete`, { input }, 60))
+    } catch (e) {
+      if (/만료/.test(e.message)) st.login = null // 로그인 세션이 끝났으면 처음부터
+      throw e
     }
   }
-  await oauthLogin(p.id, { label })
+
+  const submitKey = async (page, raw) => {
+    if (raw == null) return
+    const key = String(raw).trim()
+    if (!key) throw new Error("클립보드가 비어 있어요. sessionKey를 다시 복사해 주세요.")
+    finish(page, await api("POST", "/v1/accounts", { provider, session_key: key, label: st.label || undefined }, 60))
+  }
+
+  await openPage(accountId ? `${providerName(provider)} 다시 로그인` : `${providerName(provider)} 계정 추가`, async (page) => {
+    if (st.done) return
+    if (!accountId) {
+      page.add(headerRow("이름"))
+      page.add(valueRow("위젯에 보일 이름", st.label || "이메일 앞부분", page.run(async () => {
+        const v = await prompt("이름", "비워 두면 이메일 앞부분을 써요.", { value: st.label, placeholder: "예) 개인" })
+        if (v != null) st.label = v
+      }), { valueWidth: 50 }))
+    }
+    if (provider === "claude" && !accountId) {
+      page.add(headerRow("추가 방식"))
+      page.add(checkRow("OAuth 로그인 (추천)", st.method === "oauth", page.run(() => (st.method = "oauth")),
+        "사용량과 플랜을 안정적으로 가져와요. 초기화권은 나중에 sessionKey로 더할 수 있어요."))
+      page.add(checkRow("sessionKey", st.method === "session_key", page.run(() => (st.method = "session_key")),
+        "사용량과 초기화권까지 가져와요. claude.ai 쿠키 값이 필요해요."))
+    }
+    if (st.method === "session_key") {
+      page.add(headerRow("sessionKey"))
+      page.add(noteRow(SESSION_KEY_HELP))
+      page.add(actionRow("복사한 sessionKey 붙여넣기", page.run(() => submitKey(page, Pasteboard.paste())), ACCENT))
+      page.add(actionRow("직접 입력", page.run(async () => submitKey(page, await prompt("sessionKey", "sk-ant- 로 시작하는 값이에요.", { secure: true })))))
+      return
+    }
+    page.add(headerRow("로그인"))
+    page.add(noteRow(LOGIN_GUIDE[provider]))
+    page.add(actionRow("1. 로그인 페이지 열기", page.run(async () => {
+      if (!st.login) st.login = await api("POST", "/v1/logins", { provider, label: st.label || undefined, account_id: accountId || undefined })
+      Safari.open(st.login.authorize_url)
+    }), ACCENT))
+    page.add(actionRow("2. 복사한 값 붙여넣기", page.run(() => submitCode(page, Pasteboard.paste())), ACCENT))
+    page.add(actionRow("직접 입력", page.run(async () => submitCode(page, await prompt("직접 입력", st.login ? st.login.input_hint : "")))))
+  })
+  return !!st.done
+}
+
+// 기존 Claude 계정에 sessionKey 를 넣거나 바꾸거나 지운다.
+// OAuth 가 없는 계정은 sessionKey 가 유일한 인증이라 지울 수 없다(canDelete).
+async function sessionKeyPage(accountId, { hasKey = false, canDelete = false } = {}) {
+  let done = false
+  await openPage("sessionKey", async (page) => {
+    if (done) return
+    page.add(noteRow(SESSION_KEY_HELP))
+    const submit = async (raw) => {
+      if (raw == null) return
+      const key = String(raw).trim()
+      if (!key) throw new Error("클립보드가 비어 있어요. sessionKey를 다시 복사해 주세요.")
+      await api("PATCH", `/v1/accounts/${accountId}`, { session_key: key }, 60)
+      done = true
+      page.notice = { title: "저장했어요", detail: "초기화권을 확인했어요. 닫으면 계정 화면으로 돌아가요.", color: C.ok }
+    }
+    page.add(headerRow(hasKey ? "새 값으로 바꾸기" : "추가하기"))
+    page.add(actionRow("복사한 sessionKey 붙여넣기", page.run(() => submit(Pasteboard.paste())), ACCENT))
+    page.add(actionRow("직접 입력", page.run(async () => submit(await prompt("sessionKey", "sk-ant- 로 시작하는 값이에요.", { secure: true })))))
+    if (hasKey && canDelete) {
+      page.add(actionRow("sessionKey 삭제", page.run(async () => {
+        if (!(await confirm("sessionKey 삭제", "초기화권이 더 이상 표시되지 않아요.", "삭제", true))) return
+        await api("PATCH", `/v1/accounts/${accountId}`, { session_key: "" })
+        done = true
+        page.notice = { title: "삭제했어요", detail: "닫으면 계정 화면으로 돌아가요.", color: C.ok }
+      }), C.bad))
+    }
+  })
+  return done
 }
 
 // ───────────────────────── 앱 UI: 카드 그리기 ─────────────────────────
@@ -2062,18 +2249,22 @@ function pal() {
 function drawBarCell(ctx, w, x, y, width, dim, p) {
   const pct = w.used_percent
   const color = dim || pct == null ? p.sub : pctColor(pct)
-  drawTextAt(ctx, windowTitle(w, true), x, y + 2, width - 56, 17, Font.systemFont(13), p.sub)
+  drawTextAt(ctx, windowTitle(w), x, y + 2, width - 56, 17, Font.systemFont(13), p.sub)
   drawTextAt(ctx, fmtPct(pct), x + width - 60, y, 60, 20, Font.semiboldSystemFont(15), pctTextColor(pct, dim, p.text), "right")
   drawBar(ctx, x, y + 23, width, 7, pct, color, p.track)
   // 남은 시간은 막대 아래 작은 글씨로
   drawTextAt(ctx, resetText(w.resets_at), x, y + 33, width, 14, Font.systemFont(11), new Color(p.sub.hex, 0.85))
 }
 
-// 메인 화면의 계정 카드
-function accountCardImage(acc, enabled) {
+// 메인 화면의 계정 카드. 앱은 공간이 넓어 한도마다 한 줄씩(가로 전체) 모두 보여준다.
+const CARD_HEAD_H = 44
+const CARD_ROW_H = 56
+
+function accountCard(acc, enabled) {
   const p = pal()
   const W = cardWidth()
-  const H = 94
+  const ws = acc.windows || []
+  const H = CARD_HEAD_H + (ws.length ? ws.length * CARD_ROW_H : 36)
   const ctx = newCtx(W, H)
   const dim = acc.stale || acc.status === "needs_login"
   drawLogo(ctx, acc.provider, 0, 6, 24, p)
@@ -2081,15 +2272,9 @@ function accountCardImage(acc, enabled) {
   drawTextAt(ctx, acc.label, 34, 2, right - 40, 22, Font.semiboldSystemFont(17), dim ? p.sub : p.text)
   drawPlanBadge(ctx, acc.provider, acc.plan, { text: acc.label, x: 34, y: 2, size: 17, weight: 600 }, right - 6)
   drawTextAt(ctx, providerLine(acc), 34, 23, right - 40, 16, Font.systemFont(12), p.sub)
-  const ws = primaryWindows(acc)
-  if (!ws.length) {
-    drawTextAt(ctx, acc.error || STATUS_TEXT[acc.status] || "데이터 없음", 0, 46, W, 32, Font.systemFont(13), p.sub)
-    return ctx.getImage()
-  }
-  const gap = 18
-  const cw = ws.length > 1 ? (W - gap) / 2 : W
-  ws.forEach((w, i) => drawBarCell(ctx, w, i * (cw + gap), 44, cw, dim, p))
-  return ctx.getImage()
+  if (!ws.length) drawTextAt(ctx, acc.error || STATUS_TEXT[acc.status] || "데이터 없음", 0, CARD_HEAD_H + 2, W, 32, Font.systemFont(13), p.sub)
+  ws.forEach((w, i) => drawBarCell(ctx, w, 0, CARD_HEAD_H + i * CARD_ROW_H, W, dim, p))
+  return { image: ctx.getImage(), height: H }
 }
 
 // 상세 화면의 한도 한 줄
@@ -2180,16 +2365,15 @@ function imageRow(img, height) {
 
 // ───────────────────────── 앱 UI: 계정 상세 ─────────────────────────
 async function accountDetail(accountId) {
-  const table = new UITable()
-  table.showSeparators = true
-  let closed = false
-
-  async function render() {
+  let deleted = false
+  // 맨 위 머리 이미지가 제목 역할을 한다
+  await openPage(null, async (page) => {
+    if (deleted) return
     const { account: acc, usage } = await api("GET", `/v1/accounts/${accountId}`)
-    table.removeAllRows()
+    const patch = (body, timeout) => api("PATCH", `/v1/accounts/${accountId}`, body, timeout)
 
     await measureTexts(measureItemsFor(acc, usage, 22, 700))
-    table.addRow(imageRow(detailHeaderImage(acc, usage), 80))
+    page.add(imageRow(detailHeaderImage(acc, usage), 80))
 
     const detail = usage.error || (usage.warnings || []).join(" / ") || null
     const st = textRow(
@@ -2200,205 +2384,175 @@ async function accountDetail(accountId) {
     st.cell.titleFont = Font.systemFont(14)
     st.cell.titleColor = usage.status === "ok" ? Color.gray() : usage.status === "partial" ? C.warn : C.bad
     st.cell.subtitleColor = Color.gray()
-    table.addRow(st.row)
+    page.add(st.row)
 
     if ((usage.windows || []).length) {
-      table.addRow(headerRow("사용량"))
+      page.add(headerRow("사용량"))
       const dim = usage.stale || usage.status === "needs_login"
-      for (const w of usage.windows) table.addRow(imageRow(windowRowImage(w, dim), 72))
+      for (const w of usage.windows) page.add(imageRow(windowRowImage(w, dim), 72))
     }
 
     // Antigravity 는 초기화권이 없으므로 섹션을 아예 표시하지 않는다
     if (acc.provider !== "antigravity") {
       const rc = usage.reset_credits
       const items = (rc && rc.items) || []
-      table.addRow(headerRow(items.length ? `초기화권 ${items.length}개` : "초기화권"))
+      page.add(headerRow(items.length ? `초기화권 ${items.length}개` : "초기화권"))
       if (items.length) {
-        items.forEach((item, i) => table.addRow(imageRow(resetCreditImage(item, i, acc.provider), 70)))
+        items.forEach((item, i) => page.add(imageRow(resetCreditImage(item, i, acc.provider), 70)))
       } else if (rc) {
-        table.addRow(textRow("지금 쓸 수 있는 초기화권이 없어요", "").row)
+        page.add(textRow("지금 쓸 수 있는 초기화권이 없어요", "").row)
       } else if (acc.provider === "claude" && !acc.auth.session_key) {
-        table.addRow(textRow("sessionKey 가 있어야 확인할 수 있어요", "아래 'sessionKey 설정'에서 추가할 수 있어요.").row)
+        page.add(textRow("sessionKey가 있어야 확인할 수 있어요", "아래 'sessionKey'에서 추가할 수 있어요.").row)
       } else {
-        table.addRow(textRow("확인하지 못했어요", usage.error || "").row)
+        page.add(textRow("확인하지 못했어요", usage.error || "").row)
       }
     }
 
     const { extra_usage: eu, credits: cr } = usage.extra || {}
-    if (eu) table.addRow(textRow("추가 사용량", `${eu.used ?? "–"} / ${eu.limit ?? "–"} ${eu.currency || ""} (${fmtPct(eu.used_percent)})`, 50).row)
-    else if (cr) table.addRow(textRow("크레딧", cr.unlimited ? "무제한" : `잔액 ${cr.balance ?? "–"}`, 50).row)
+    if (eu) page.add(textRow("추가 사용량", `${eu.used ?? "–"} / ${eu.limit ?? "–"} ${eu.currency || ""} (${fmtPct(eu.used_percent)})`, 50).row)
+    else if (cr) page.add(textRow("크레딧", cr.unlimited ? "무제한" : `잔액 ${cr.balance ?? "–"}`, 50).row)
 
-    table.addRow(headerRow("관리"))
-    // 작업 후 화면을 다시 그린다(삭제했으면 그리지 않음)
-    const action = (title, fn, color) =>
-      table.addRow(actionRow(title, async () => {
-        await guarded(fn)
-        if (!closed) await guarded(render)
-      }, color))
-
-    action("지금 새로고침", () => api("POST", `/v1/accounts/${accountId}/refresh`, undefined, 60))
-    action("이름 변경", async () => {
-      const name = await prompt("이름 변경", "위젯에 보일 새 이름을 적어 주세요.", { value: acc.label })
-      if (name) await api("PATCH", `/v1/accounts/${accountId}`, { label: name })
-    })
-    if (acc.provider !== "claude" || acc.auth.oauth || usage.status === "needs_login") {
-      action("다시 로그인", () => oauthLogin(acc.provider, { accountId }))
-    }
+    page.add(headerRow("관리"))
+    page.add(actionRow("지금 새로고침", page.run(() => api("POST", `/v1/accounts/${accountId}/refresh`, undefined, 60)), ACCENT))
+    page.add(valueRow("이름", acc.label, page.run(async () => {
+      const name = await prompt("이름", "위젯에 보일 이름이에요.", { value: acc.label })
+      if (name) await patch({ label: name })
+    }), { valueWidth: 55 }))
+    page.add(toggleRow("위젯에 표시", acc.enabled, page.run(() => patch({ enabled: !acc.enabled }))))
     if (acc.provider === "claude") {
-      const setKey = async () => {
-        const key = await prompt("sessionKey", SESSION_KEY_HELP, { secure: true, placeholder: "sk-ant-..." })
-        if (key) await api("PATCH", `/v1/accounts/${accountId}`, { session_key: key }, 60)
-      }
-      if (!acc.auth.session_key) {
-        action("sessionKey 설정 (초기화권 보기)", setKey)
-      } else {
-        action("sessionKey 관리", async () => {
-          // OAuth 가 없는 계정은 sessionKey 가 유일한 인증이라 제거할 수 없다
-          const opts = acc.auth.oauth ? ["새 값으로 바꾸기", "삭제"] : ["새 값으로 바꾸기"]
-          const i = await choose("sessionKey", "초기화권을 확인할 때 쓰는 claude.ai 쿠키예요.", opts)
-          if (i === 0) await setKey()
-          if (i === 1 && (await confirm("sessionKey 삭제", "초기화권이 더 이상 표시되지 않아요.", "삭제", true)))
-            await api("PATCH", `/v1/accounts/${accountId}`, { session_key: "" })
-        })
-      }
+      page.add(valueRow("sessionKey", acc.auth.session_key ? "있음" : "없음", page.run(() =>
+        sessionKeyPage(accountId, { hasKey: !!acc.auth.session_key, canDelete: !!acc.auth.oauth })
+      ), { subtitle: "초기화권을 확인할 때 써요" }))
     }
-    action(acc.enabled ? "위젯에서 숨기기" : "위젯에 다시 보이기", () =>
-      api("PATCH", `/v1/accounts/${accountId}`, { enabled: !acc.enabled })
-    )
-    action(
-      "계정 삭제",
-      async () => {
-        if (await confirm("계정 삭제", `${acc.label} 계정과 로그인 정보를 ${getConfig().device ? "이 iPhone" : "서버"}에서 지울까요?`, "삭제", true)) {
-          await api("DELETE", `/v1/accounts/${accountId}`)
-          closed = true
-          await alertMsg("삭제했어요", "이 화면을 닫으면 목록으로 돌아가요.")
-        }
-      },
-      Color.red()
-    )
-    table.reload()
-    return true
-  }
-
-  if (!(await guarded(render))) return
-  await table.present(false)
-  closed = true
-}
-
-// ───────────────────────── 앱 UI: 설정 메뉴 ─────────────────────────
-// 자주 쓰지 않는 항목을 모은다. 화면을 다시 그려야 하면 true.
-async function settingsMenu() {
-  const mode = getMode()
-  const notify = notifySettings()
-  const items = [
-    {
-      label: `연결 방식: ${mode === "device" ? "이 iPhone" : "내 서버"}`,
-      run: () => chooseMode("연결 방식", "기기 모드와 서버 모드는 계정 목록을 따로 관리해요."),
-    },
-  ]
-  if (mode === "server") items.push({ label: "서버 주소·API 키 변경", run: () => setupServer() })
-  if (mode === "device") items.push({ label: `Antigravity 로그인 설정${agClient() ? " (입력됨)" : ""}`, run: () => setupAntigravityClient() })
-  items.push({ label: `알림: ${notify.enabled ? `켜짐 (${notify.threshold}% 이상)` : "꺼짐"}`, run: () => notifyMenu() })
-  items.push({
-    label: `Claude 로고: ${claudeLogo() === "clawd" ? "Clawd" : "기본"}`,
-    run: () => {
-      setClaudeLogo(claudeLogo() === "clawd" ? "default" : "clawd")
-      logoCache = {}
-    },
+    if (acc.provider !== "claude" || acc.auth.oauth || usage.status === "needs_login") {
+      page.add(linkRow("다시 로그인", page.run(() => loginPage(acc.provider, { accountId }))))
+    }
+    page.add(actionRow("계정 삭제", page.run(async () => {
+      const where = getConfig().device ? "이 iPhone" : "서버"
+      if (!(await confirm("계정 삭제", `${acc.label} 계정과 로그인 정보를 ${where}에서 지울까요?`, "삭제", true))) return
+      await api("DELETE", `/v1/accounts/${accountId}`)
+      deleted = true
+      page.notice = { title: "삭제했어요", detail: "이 화면을 닫으면 목록으로 돌아가요.", color: C.ok }
+    }), C.bad))
   })
-  const i = await choose("설정", `v${VERSION}`, items.map((x) => x.label))
-  if (i < 0) return false
-  await items[i].run()
-  return true
 }
 
-async function notifyMenu() {
-  const cur = notifySettings()
-  const levels = [80, 90, 95]
-  const opts = [cur.enabled ? "알림 끄기" : "알림 켜기", ...levels.map((v) => `기준 ${v}%${cur.threshold === v ? " (지금)" : ""}`), "테스트 알림 보내기"]
-  const i = await choose(
-    "알림",
-    "사용량이 기준을 넘을 때, 그 한도가 초기화될 때, 다시 로그인해야 할 때, 초기화권 만료가 하루 안으로 다가왔을 때 알려 드려요.",
-    opts
-  )
-  if (i < 0) return
-  if (i === 0) saveNotifySettings({ ...cur, enabled: !cur.enabled })
-  else if (i <= levels.length) saveNotifySettings({ ...cur, enabled: true, threshold: levels[i - 1] })
-  else await sendNotification({ id: "aiusage-test", title: "AI 사용량", body: "알림이 이렇게 와요." })
+// ───────────────────────── 앱 UI: 설정 ─────────────────────────
+async function settingsPage() {
+  await openPage("설정", async (page) => {
+    const mode = getMode()
+    page.add(headerRow("연결 방식"))
+    page.add(checkRow("이 iPhone에서 직접", mode === "device", page.run(() => {
+      if (mode === "device") return
+      setMode("device")
+      page.notice = { title: "이 iPhone에서 직접 가져와요", detail: "계정 목록은 방식마다 따로예요. 필요하면 계정을 다시 추가해 주세요.", color: C.ok }
+    }), "서버 없이 이 스크립트가 로그인하고 조회해요."))
+    const server = mode === "server" && Keychain.contains(KC_SERVER) ? Keychain.get(KC_SERVER).replace(/^https?:\/\//, "") : null
+    page.add(checkRow("내 서버", mode === "server", page.run(async () => {
+      if (await serverPage()) page.notice = { title: "서버에 연결했어요", detail: "닫으면 서버의 계정 목록을 보여 드려요.", color: C.ok }
+    }), server || "직접 띄운 서버가 모은 사용량을 받아와요."))
+    if (mode === "device") {
+      page.add(valueRow("Antigravity 로그인 설정", agClient() ? "입력됨" : "없음", page.run(antigravityPage), { valueWidth: 25 }))
+    }
+
+    const n = notifySettings()
+    page.add(headerRow("위젯·알림"))
+    page.add(valueRow("알림", n.enabled ? `켜짐 · ${n.threshold}%` : "꺼짐", page.run(notifyPage)))
+    page.add(linkRow("위젯 미리보기", page.run(widgetPreviewPage)))
+
+    page.add(headerRow("Claude 로고"))
+    for (const [value, title] of [["default", "기본"], ["clawd", "Clawd"]]) {
+      page.add(checkRow(title, claudeLogo() === value, page.run(() => {
+        setClaudeLogo(value)
+        logoCache = {}
+      })))
+    }
+    page.add(noteRow(`버전 ${VERSION}`))
+  })
+}
+
+async function notifyPage() {
+  await openPage("알림", async (page) => {
+    const cur = notifySettings()
+    const save = (patch) => saveNotifySettings({ ...cur, ...patch })
+    page.add(toggleRow("알림 받기", cur.enabled, page.run(() => save({ enabled: !cur.enabled }))))
+    if (!cur.enabled) return
+
+    page.add(headerRow("받을 알림"))
+    for (const t of NOTIFY_TYPES) {
+      const on = cur.types[t.key]
+      page.add(toggleRow(t.title, on, page.run(() => save({ types: { ...cur.types, [t.key]: !on } })), t.desc))
+    }
+
+    page.add(headerRow("경고 기준"))
+    for (const v of [80, 90, 95]) page.add(checkRow(`${v}% 이상`, cur.threshold === v, page.run(() => save({ threshold: v }))))
+    page.add(noteRow("사용량 경고와 초기화 알림은 위젯 대표 한도(현재 세션·이번 주 등)가 이 기준을 넘었을 때만 와요."))
+
+    page.add(headerRow("테스트"))
+    page.add(actionRow("테스트 알림 보내기", page.run(async () => {
+      await sendNotification({ id: "aiusage-test", title: "AI 사용량", body: "알림이 이렇게 와요." })
+      page.notice = { title: "보냈어요", detail: "알림이 오지 않으면 iPhone 설정 → 앱 → Scriptable → 알림을 확인해 주세요.", color: C.ok }
+    }), ACCENT))
+    page.add(noteRow("위젯이 새로 고쳐질 때(약 15분마다)와 앱을 열 때 확인해요. 그래서 조기 초기화는 몇 분 늦게 알 수 있어요."))
+  })
+}
+
+async function widgetPreviewPage() {
+  await openPage("위젯 미리보기", async (page) => {
+    page.add(noteRow("홈 화면에 올렸을 때의 모습이에요. 위젯은 약 15분마다 새로 고쳐져요."))
+    for (const [size, title] of [["small", "소형"], ["medium", "중형"], ["large", "대형"]]) {
+      page.add(linkRow(title, page.run(async () => {
+        const w = buildHomeWidget(await loadUsage(false), size, "")
+        await { small: () => w.presentSmall(), medium: () => w.presentMedium(), large: () => w.presentLarge() }[size]()
+      })))
+    }
+    page.add(noteRow("위젯을 길게 눌러 '위젯 편집' → Parameter에 계정 이름을 쉼표로 적으면 그 계정만 보여요. 예) 개인,회사"))
+  })
 }
 
 // ───────────────────────── 앱 UI: 메인 ─────────────────────────
 async function mainMenu() {
-  if (!getConfig() && !(await chooseMode("시작하기", "사용량을 어디서 가져올지 골라 주세요. 나중에 설정에서 바꿀 수 있어요."))) return
+  let refresh = false
+  await openPage("AI 사용량", async (page) => {
+    if (!getConfig()) {
+      page.add(noteRow("Claude · Codex · Antigravity 사용량을 한곳에서 보여 줘요. 먼저 사용량을 어디서 가져올지 골라 주세요. 나중에 설정에서 바꿀 수 있어요."))
+      page.add(headerRow("시작하기"))
+      page.add(linkRow("이 iPhone에서 직접", page.run(() => setMode("device")), "서버 없이 바로 시작해요. 로그인 정보는 키체인에 저장돼요."))
+      page.add(linkRow("내 서버에 연결", page.run(serverPage), "직접 띄운 서버의 주소와 API 키가 필요해요."))
+      return
+    }
 
-  const table = new UITable()
-  table.showSeparators = true
-
-  async function render(refresh = false) {
-    table.removeAllRows()
-    const head = new UITableRow()
-    head.isHeader = true
-    head.height = 60
-    const h = head.addText("AI 사용량", getConfig().server)
-    h.titleFont = Font.boldSystemFont(22)
-    table.addRow(head)
-
+    const doRefresh = refresh
+    refresh = false
     let accounts = []
-    let usage = {}
-    let errorMsg = null
+    const usage = {}
     try {
-      const [acc, u] = await Promise.all([api("GET", "/v1/accounts"), loadUsage(refresh)])
+      const [acc, u] = await Promise.all([api("GET", "/v1/accounts"), loadUsage(doRefresh)])
       accounts = acc.accounts
       for (const a of u.data.accounts) usage[a.id] = a
-      if (u.offline) errorMsg = `마지막으로 받은 값을 보여 드려요. (${u.error})`
+      if (u.offline) page.add(noticeRow({ title: "마지막으로 받은 값이에요", detail: u.error, color: C.warn }))
       else await checkAlerts(u.data.accounts)
     } catch (e) {
-      errorMsg = e.message
+      page.add(noticeRow({ title: getConfig().device ? "불러오지 못했어요" : "서버에 연결하지 못했어요", detail: e.message, color: C.bad }))
     }
 
-    if (errorMsg) {
-      const { row, cell } = textRow(getConfig().device ? "불러오지 못했어요" : "서버에 연결하지 못했어요", errorMsg, 60)
-      cell.titleColor = Color.red()
-      table.addRow(row)
-    }
-
-    table.addRow(headerRow(`계정 (${accounts.length})`))
-    if (!accounts.length && !errorMsg) table.addRow(textRow("아직 계정이 없어요", "아래 '계정 추가'로 시작해 보세요.").row)
-
+    page.add(headerRow(`계정 (${accounts.length})`))
+    if (!accounts.length) page.add(textRow("아직 계정이 없어요", "아래 '계정 추가'로 시작해 보세요.").row)
     await measureTexts(accounts.flatMap((acc) => measureItemsFor(acc, usage[acc.id], 17, 600)))
     for (const acc of accounts) {
       const u = usage[acc.id] || { ...acc, windows: [] }
-      const r = imageRow(accountCardImage({ ...acc, ...u, label: acc.label }, acc.enabled), 114)
+      const card = accountCard({ ...acc, ...u, label: acc.label }, acc.enabled)
+      const r = imageRow(card.image, card.height + 20)
       r.dismissOnSelect = false
-      r.onSelect = async () => {
-        await accountDetail(acc.id)
-        await guarded(() => render(false))
-      }
-      table.addRow(r)
+      r.onSelect = page.run(() => accountDetail(acc.id))
+      page.add(r)
     }
 
-    table.addRow(headerRow("작업"))
-    const action = (title, fn) => table.addRow(actionRow(title, () => guarded(fn)))
-    action("계정 추가", async () => {
-      await addAccount()
-      await render(false)
-    })
-    action("전체 새로고침", () => render(true))
-    action("위젯 미리보기", async () => {
-      const i = await choose("위젯 미리보기", null, ["소형", "중형", "대형"])
-      if (i < 0) return
-      const size = ["small", "medium", "large"][i]
-      const w = buildHomeWidget(await loadUsage(false), size, "")
-      await [() => w.presentSmall(), () => w.presentMedium(), () => w.presentLarge()][i]()
-    })
-    action("설정", async () => {
-      if (await settingsMenu()) await render(false)
-    })
-    table.reload()
-  }
-
-  await render(false)
-  await table.present(false)
+    page.add(headerRow("작업"))
+    page.add(linkRow("계정 추가", page.run(addAccountPage)))
+    page.add(actionRow("전체 새로고침", page.run(() => (refresh = true)), ACCENT))
+    page.add(linkRow("설정", page.run(settingsPage)))
+  })
 }
 
 // ───────────────────────── 로고 (LobeHub Icons, MIT) ─────────────────────────

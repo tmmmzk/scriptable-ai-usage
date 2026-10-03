@@ -17,9 +17,11 @@ const UUID = { string: () => crypto.randomUUID().toUpperCase() }
 class Color { constructor(h, a) { this.hex = h; this.a = a } static dynamic(l) { return l } static white() { return new Color("#fff") } static red() { return new Color("#f00") } static gray() { return new Color("#888") } }
 const Font = new Proxy({}, { get: () => () => ({}) })
 const notifications = []
+const removed = []
 class Notification {
   setTriggerDate(d) { this.at = d }
   async schedule() { notifications.push({ id: this.identifier, title: this.title, body: this.body, at: this.at }) }
+  static async removePending(ids) { removed.push(...ids) }
 }
 const URLScheme = { forRunningScript: () => "scriptable:///run/AIUsage" }
 
@@ -334,6 +336,41 @@ await test("알림: 기준 초과·초기화 예약·재로그인·초기화권 
   api.saveNotifySettings({ enabled: false, threshold: 40 })
   await api.checkAlerts([{ ...accounts[0], id: "a9" }])
   assert.equal(notifications.length, 0)
+  api.saveNotifySettings({ enabled: true, threshold: 90 })
+})
+
+await test("알림: 종류별로 끄기, 예정보다 이른 초기화 감지", async () => {
+  const H = 3600e3
+  const at = (ms) => new Date(Date.now() + ms).toISOString()
+  const acc = (id, used, resetsAt) => ({ id, provider: "claude", label: "개인", status: "ok",
+    windows: [{ key: "weekly", label: "이번 주", used_percent: used, resets_at: resetsAt, primary: true }] })
+  // 사용량 경고만 끄면 초기화 예약만 남는다
+  api.saveNotifySettings({ enabled: true, threshold: 90, types: { high: false } })
+  notifications.length = 0
+  await api.checkAlerts([acc("e1", 95, at(48 * H))])
+  assert.deepEqual(notifications.map((n) => n.id), ["aiusage-reset-e1-weekly"])
+  // 예정(48시간 뒤)보다 일찍 95% → 3% 로 떨어지면 조기 초기화 알림, 예약해 둔 초기화 알림은 취소
+  notifications.length = 0
+  removed.length = 0
+  await api.checkAlerts([acc("e1", 3, at(7 * 24 * H))])
+  assert.deepEqual(notifications.map((n) => n.id), ["aiusage-early-e1-weekly"])
+  assert.equal(notifications[0].body, "이번 주 한도가 예정보다 일찍 초기화됐어요. (95% → 3%)")
+  assert.deepEqual(removed, ["aiusage-reset-e1-weekly"])
+  // 같은 초기화는 한 번만
+  notifications.length = 0
+  await api.checkAlerts([acc("e1", 3, at(7 * 24 * H))])
+  assert.equal(notifications.length, 0)
+  // 예정 시각이 지난 뒤의 정상 초기화, 조금 줄어든 값은 조기 초기화가 아니다
+  await api.checkAlerts([acc("e2", 60, at(-60e3))])
+  await api.checkAlerts([acc("e2", 1, at(7 * 24 * H))])
+  await api.checkAlerts([acc("e3", 60, at(48 * H))])
+  await api.checkAlerts([acc("e3", 55, at(48 * H))])
+  assert.equal(notifications.length, 0)
+  // 조기 초기화 알림을 끄면 보내지 않는다
+  api.saveNotifySettings({ enabled: true, threshold: 90, types: { early: false } })
+  await api.checkAlerts([acc("e4", 70, at(48 * H))])
+  await api.checkAlerts([acc("e4", 0, at(7 * 24 * H))])
+  assert.equal(notifications.filter((n) => n.id.startsWith("aiusage-early")).length, 0)
   api.saveNotifySettings({ enabled: true, threshold: 90 })
 })
 
