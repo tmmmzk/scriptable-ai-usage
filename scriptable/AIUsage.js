@@ -9,7 +9,7 @@
 // • 앱에서 실행하면 설정·계정 관리 화면이 열립니다.
 // • 위젯 Parameter 에 계정 이름(또는 id)을 쉼표로 적으면 그 계정만 표시합니다. 예) 개인,회사
 
-const VERSION = "0.7.0"
+const VERSION = "0.7.1"
 // 앱의 '업데이트'가 새 버전을 받아오는 주소(공개 저장소의 raw 파일). 포크했다면 여기를 바꾸세요.
 const UPDATE_URL = "https://raw.githubusercontent.com/tmmmzk/scriptable-ai-usage/main/scriptable/AIUsage.js"
 const KC_SERVER = "aiusage.server"
@@ -1708,7 +1708,7 @@ function buildHomeWidget(result, size, param) {
     head.layoutHorizontally()
     head.centerAlignContent()
     head.size = new Size(inner, 0)
-    addText(head, showLeft() ? `${APP_TITLE} · ${t("show.leftTag")}` : APP_TITLE, Font.semiboldSystemFont(13), C.text)
+    addText(head, APP_TITLE, Font.semiboldSystemFont(13), C.text)
     head.addSpacer()
     addText(head, offline ? `${t("pill.offline")} · ${fmtAgo(data.generated_at)}` : t("widget.updated", { ago: fmtAgo(data.generated_at) }),
       Font.systemFont(10), offline ? C.warn : C.sub)
@@ -2667,11 +2667,12 @@ async function accountDetail(accountId) {
       const label = await prompt(t("common.name"), null, { value: acc.label })
       if (label) await patch({ label })
     }), { valueWidth: 55 }))
-    page.add(toggleRow(t("detail.showInWidget"), acc.enabled, page.run(() => patch({ enabled: !acc.enabled })), t("detail.showInWidgetDesc")))
+    page.add(toggleRow(t("detail.showInWidget"), acc.enabled, page.run(() => patch({ enabled: !acc.enabled }))))
     const groups = windowGroups(usage)
     if (acc.provider === "antigravity" && groups.length > 1) {
       const cur = widgetGroupOf({ ...usage, id: accountId })
-      for (const g of groups) page.add(checkRow(t("detail.widgetGroup", { group: groupShort(g) }), g === cur, page.run(() => setWidgetGroup(accountId, g))))
+      const next = groups[(groups.indexOf(cur) + 1) % groups.length]
+      page.add(valueRow(t("detail.widgetModel"), groupShort(cur), page.run(() => setWidgetGroup(accountId, next))))
     }
     // sessionKey 는 OAuth 로 초기화권을 못 받을 때만 필요하다
     if (acc.provider === "claude" && (acc.auth.session_key || !usage.reset_credits)) {
@@ -2706,28 +2707,21 @@ async function settingsPage() {
     page.add(checkRow(t("mode.server"), mode === "server", page.run(async () => {
       if (await serverPage()) page.ok(t("mode.serverSet"))
     }), server || null))
-    if (mode === "device") {
-      page.add(valueRow(t("ag.title"), agClient() ? t("common.set") : t("common.none"), page.run(antigravityPage), { valueWidth: 25 }))
-    }
+    // 처음 넣는 건 계정 추가에서 물어본다. 여기서는 넣은 값을 바꿀 때만.
+    if (mode === "device" && agClient()) page.add(linkRow(t("ag.title"), page.run(antigravityPage)))
 
-    const n = notifySettings()
-    page.add(headerRow(t("settings.widgetNotify")))
-    page.add(valueRow(t("settings.notify"), n.enabled ? t("settings.notifyOn", { n: n.threshold }) : t("common.off"), page.run(notifyPage)))
-    page.add(linkRow(t("settings.preview"), page.run(widgetPreviewPage)))
+    page.add(headerRow(t("settings.general")))
+    page.add(valueRow(t("settings.notify"), t(notifySettings().enabled ? "common.on" : "common.off"), page.run(notifyPage)))
     page.add(valueRow(t("show.title"), t(showLeft() ? "show.left" : "show.used"), page.run(() => setShowLeft(!showLeft())), { valueWidth: 40 }))
     const setting = langSetting()
     page.add(valueRow(t("settings.language"), LANG_INFO[setting] ? LANG_INFO[setting].name : t("lang.auto"), page.run(languagePage), { valueWidth: 50 }))
-
-    page.add(headerRow(t("settings.claudeLogo")))
-    for (const [value, title] of [["default", t("settings.logoDefault")], ["clawd", "Clawd"]]) {
-      page.add(checkRow(title, claudeLogo() === value, page.run(() => {
-        setClaudeLogo(value)
-        logoCache = {}
-      })))
-    }
+    page.add(valueRow(t("settings.claudeLogo"), claudeLogo() === "clawd" ? "Clawd" : t("settings.logoDefault"), page.run(() => {
+      setClaudeLogo(claudeLogo() === "clawd" ? "default" : "clawd")
+      logoCache = {}
+    })))
+    page.add(linkRow(t("settings.preview"), page.run(widgetPreviewPage)))
     const latest = updateState().latest
     const fresh = isNewer(latest, VERSION)
-    page.add(headerRow(t("update.title")))
     page.add(valueRow(t("settings.version", { v: VERSION }), fresh ? t("update.available", { v: latest }) : "›",
       page.run(updatePage), { color: fresh ? ACCENT : null, valueWidth: fresh ? 40 : 12 }))
   })
@@ -2800,7 +2794,6 @@ async function notifyPage() {
     page.add(headerRow(t("notify.threshold")))
     for (const v of [80, 90, 95]) page.add(checkRow(t("notify.thresholdRow", { n: v }), cur.threshold === v, page.run(() => save({ threshold: v }))))
 
-    page.add(headerRow(t("notify.testSection")))
     page.add(actionRow(t("notify.test"), page.run(async () => {
       await sendNotification({ id: "aiusage-test", title: APP_TITLE, body: t("notify.test.body") })
       page.ok(t("notify.sent"), t("notify.sentDetail"))
@@ -2861,7 +2854,7 @@ async function mainMenu() {
       page.add(noticeRow({ title: t(getConfig().device ? "common.loadFailed" : "main.serverFailed"), detail: e.message, color: C.bad }))
     }
 
-    page.add(headerRow(t("main.accounts", { n: accounts.length }) + (showLeft() ? ` · ${t("show.leftTag")}` : "")))
+    page.add(headerRow(t("main.accounts", { n: accounts.length })))
     if (!accounts.length) page.add(textRow(t("main.noAccounts"), null, { color: Color.gray() }))
     await measureTexts(accounts.flatMap((acc) => measureItemsFor(acc, usage[acc.id], "card")))
     for (const acc of accounts) {
@@ -3109,8 +3102,7 @@ const STRINGS = {
   "detail.manage": ["관리", "Manage", "管理", "管理"],
   "detail.refresh": ["지금 새로고침", "Refresh now", "今すぐ更新", "立即刷新"],
   "detail.showInWidget": ["위젯에 표시", "Show in widget", "ウィジェットに表示", "在小组件中显示"],
-  "detail.showInWidgetDesc": ["끄면 위젯과 알림에서만 빠져요", "Off hides it from widgets and notifications only", "オフにするとウィジェットと通知にだけ表示されません", "关闭后仅在小组件和通知中隐藏"],
-  "detail.widgetGroup": ["위젯에 {group} 보이기", "Show {group} in widget", "ウィジェットに {group} を表示", "小组件显示 {group}"],
+  "detail.widgetModel": ["위젯에 보일 모델", "Widget shows", "ウィジェットに表示", "小组件显示"],
   "detail.relogin": ["다시 로그인", "Sign in again", "再ログイン", "重新登录"],
   "detail.delete": ["계정 삭제", "Delete account", "アカウントを削除", "删除账号"],
   "detail.deleteConfirm": ["{name} 계정과 로그인 정보를 {where}에서 지울까요?", "Delete {name} and its sign-in data from {where}?",
@@ -3130,12 +3122,10 @@ const STRINGS = {
   "show.title": ["퍼센트 표시", "Percent shows", "パーセント表示", "百分比显示"],
   "show.used": ["사용한 양", "Used", "使用量", "已用"],
   "show.left": ["남은 양", "Remaining", "残り", "剩余"],
-  "show.leftTag": ["남은 양", "remaining", "残り", "剩余"],
   "settings.title": ["설정", "Settings", "設定", "设置"],
+  "settings.general": ["일반", "General", "一般", "通用"],
   "settings.connection": ["연결 방식", "Connection", "接続方法", "连接方式"],
-  "settings.widgetNotify": ["위젯·알림", "Widget & notifications", "ウィジェット・通知", "小组件与通知"],
   "settings.notify": ["알림", "Notifications", "通知", "通知"],
-  "settings.notifyOn": ["켜짐 · {n}%", "On · {n}%", "オン · {n}%", "开 · {n}%"],
   "settings.preview": ["위젯 미리보기", "Widget preview", "ウィジェットのプレビュー", "小组件预览"],
   "settings.claudeLogo": ["Claude 로고", "Claude logo", "Claude ロゴ", "Claude 图标"],
   "settings.logoDefault": ["기본", "Default", "標準", "默认"],
@@ -3174,7 +3164,6 @@ const STRINGS = {
   "notify.types": ["받을 알림", "Notify me about", "受け取る通知", "通知类型"],
   "notify.threshold": ["경고 기준", "Warning threshold", "警告のしきい値", "警告阈值"],
   "notify.thresholdRow": ["{n}% 이상", "{n}% or more", "{n}% 以上", "{n}% 及以上"],
-  "notify.testSection": ["테스트", "Test", "テスト", "测试"],
   "notify.test": ["테스트 알림 보내기", "Send a test notification", "テスト通知を送る", "发送测试通知"],
   "notify.sent": ["보냈어요", "Sent", "送信しました", "已发送"],
   "notify.sentDetail": ["알림이 오지 않으면 iPhone 설정 → 앱 → Scriptable → 알림을 확인해 주세요.",
