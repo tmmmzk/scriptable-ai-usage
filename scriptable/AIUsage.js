@@ -1305,7 +1305,7 @@ function fmtDate(iso) {
   if (!iso) return ""
   const df = new DateFormatter()
   df.locale = "ko_KR"
-  df.dateFormat = "M월 d일 HH:mm"
+  df.dateFormat = "M월 d일 (E) HH:mm"
   return df.string(new Date(iso))
 }
 
@@ -2190,12 +2190,17 @@ function textW(text, size, weight = 400) {
   return v != null ? Math.ceil(v) : estWidth(text, size)
 }
 
-// 카드·상세 머리에 쓰는 글자들을 미리 잰다
-function measureItemsFor(acc, usage, nameSize, nameWeight) {
+// 카드·상세에 쓰는 글자들을 미리 잰다. style 은 한도 줄 모양(LINE_STYLE 의 키).
+function measureItemsFor(acc, usage, nameSize, nameWeight, style) {
   const items = [{ text: acc.label, size: nameSize, weight: nameWeight }]
   const plan = planLabel((usage && usage.plan) || acc.plan, acc.provider)
   if (plan) items.push({ text: plan, size: 10, weight: 700 })
   for (const pill of statusPills(usage || acc, { enabled: acc.enabled })) items.push({ text: pill.text, size: 11, weight: 600 })
+  const s = LINE_STYLE[style]
+  for (const w of (usage || acc).windows || []) {
+    items.push({ text: windowTitle(w), size: s.title[0], weight: s.title[1] }, { text: fmtPct(w.used_percent), size: s.pct, weight: 600 })
+    for (const t of timeCandidates(w.resets_at)) items.push({ text: t, size: s.time, weight: 400 })
+  }
   return items
 }
 
@@ -2246,25 +2251,47 @@ function pal() {
   return _pal || (_pal = appPalette())
 }
 
-function drawBarCell(ctx, w, x, y, width, dim, p) {
+// 앱의 한도 한 줄: 왼쪽 이름, 오른쪽 '남은 시간  퍼센트', 아래 막대.
+// 글자 크기가 달라도 밑줄(baseline)이 맞도록 y 를 잡았다.
+const LINE_STYLE = {
+  card: { title: [13, 400], titleY: 2, pct: 15, time: 12, timeY: 3, barY: 23, barH: 7 },
+  detail: { title: [15, 500], titleY: 4, pct: 18, time: 13, timeY: 7, barY: 30, barH: 8 },
+}
+
+// 남은 시간 표기 후보(긴 것부터). 이름과 겹치면 짧은 것으로 바꾼다.
+function timeCandidates(iso) {
+  if (!iso) return []
+  const left = fmtDuration(iso)
+  return left ? [`${left} 후 초기화`, `${left} 후`] : ["곧 초기화"]
+}
+
+function drawWindowLine(ctx, w, y, width, dim, p, style) {
+  const s = LINE_STYLE[style]
   const pct = w.used_percent
-  const color = dim || pct == null ? p.sub : pctColor(pct)
-  drawTextAt(ctx, windowTitle(w), x, y + 2, width - 56, 17, Font.systemFont(13), p.sub)
-  drawTextAt(ctx, fmtPct(pct), x + width - 60, y, 60, 20, Font.semiboldSystemFont(15), pctTextColor(pct, dim, p.text), "right")
-  drawBar(ctx, x, y + 23, width, 7, pct, color, p.track)
-  // 남은 시간은 막대 아래 작은 글씨로
-  drawTextAt(ctx, resetText(w.resets_at), x, y + 33, width, 14, Font.systemFont(11), new Color(p.sub.hex, 0.85))
+  const pctText = fmtPct(pct)
+  const title = windowTitle(w)
+  const titleFont = s.title[1] >= 500 ? Font.mediumSystemFont(s.title[0]) : Font.systemFont(s.title[0])
+  const pctFont = Font.semiboldSystemFont(s.pct)
+  drawTextAt(ctx, pctText, width - 80, y, 80, s.pct + 6, pctFont, pctTextColor(pct, dim, p.text), "right")
+  const timeRight = width - textW(pctText, s.pct, 600) - 8
+  const room = timeRight - textW(title, s.title[0], s.title[1]) - 14
+  const time = timeCandidates(w.resets_at).find((t) => textW(t, s.time, 400) <= room)
+  const titleRight = time ? timeRight - textW(time, s.time, 400) - 10 : timeRight
+  drawTextAt(ctx, title, 0, y + s.titleY, titleRight, s.title[0] + 6, titleFont, style === "card" ? p.sub : p.text)
+  if (time) drawTextAt(ctx, time, 0, y + s.timeY, timeRight, s.time + 5, Font.systemFont(s.time), new Color(p.sub.hex, 0.85), "right")
+  drawBar(ctx, 0, y + s.barY, width, s.barH, pct, dim || pct == null ? p.sub : pctColor(pct), p.track)
 }
 
 // 메인 화면의 계정 카드. 앱은 공간이 넓어 한도마다 한 줄씩(가로 전체) 모두 보여준다.
 const CARD_HEAD_H = 44
-const CARD_ROW_H = 56
+const CARD_ROW_H = 42
 
 function accountCard(acc, enabled) {
   const p = pal()
   const W = cardWidth()
   const ws = acc.windows || []
-  const H = CARD_HEAD_H + (ws.length ? ws.length * CARD_ROW_H : 36)
+  // 마지막 줄은 막대 아래 여백 없이 끝낸다
+  const H = CARD_HEAD_H + (ws.length ? (ws.length - 1) * CARD_ROW_H + LINE_STYLE.card.barY + LINE_STYLE.card.barH + 2 : 36)
   const ctx = newCtx(W, H)
   const dim = acc.stale || acc.status === "needs_login"
   drawLogo(ctx, acc.provider, 0, 6, 24, p)
@@ -2273,21 +2300,17 @@ function accountCard(acc, enabled) {
   drawPlanBadge(ctx, acc.provider, acc.plan, { text: acc.label, x: 34, y: 2, size: 17, weight: 600 }, right - 6)
   drawTextAt(ctx, providerLine(acc), 34, 23, right - 40, 16, Font.systemFont(12), p.sub)
   if (!ws.length) drawTextAt(ctx, acc.error || STATUS_TEXT[acc.status] || "데이터 없음", 0, CARD_HEAD_H + 2, W, 32, Font.systemFont(13), p.sub)
-  ws.forEach((w, i) => drawBarCell(ctx, w, 0, CARD_HEAD_H + i * CARD_ROW_H, W, dim, p))
+  ws.forEach((w, i) => drawWindowLine(ctx, w, CARD_HEAD_H + i * CARD_ROW_H, W, dim, p, "card"))
   return { image: ctx.getImage(), height: H }
 }
 
-// 상세 화면의 한도 한 줄
+// 상세 화면의 한도 한 줄. 막대 아래에는 초기화 날짜·시각을 적는다.
 function windowRowImage(w, dim) {
   const p = pal()
   const W = cardWidth()
   const ctx = newCtx(W, 58)
-  const pct = w.used_percent
-  drawTextAt(ctx, windowTitle(w), 0, 4, W - 80, 20, Font.mediumSystemFont(15), p.text)
-  drawTextAt(ctx, fmtPct(pct), W - 80, 2, 80, 22, Font.semiboldSystemFont(18), pctTextColor(pct, dim, p.text), "right")
-  drawBar(ctx, 0, 30, W, 8, pct, dim ? p.sub : pctColor(pct), p.track)
-  const reset = w.resets_at ? `${resetText(w.resets_at)} (${fmtDate(w.resets_at)})` : "초기화 시각 정보 없음"
-  drawTextAt(ctx, reset, 0, 42, W, 16, Font.systemFont(11), p.sub)
+  drawWindowLine(ctx, w, 0, W, dim, p, "detail")
+  drawTextAt(ctx, w.resets_at ? `${fmtDate(w.resets_at)} 초기화` : "초기화 시각 정보 없음", 0, 42, W, 16, Font.systemFont(11), p.sub)
   return ctx.getImage()
 }
 
@@ -2372,7 +2395,7 @@ async function accountDetail(accountId) {
     const { account: acc, usage } = await api("GET", `/v1/accounts/${accountId}`)
     const patch = (body, timeout) => api("PATCH", `/v1/accounts/${accountId}`, body, timeout)
 
-    await measureTexts(measureItemsFor(acc, usage, 22, 700))
+    await measureTexts(measureItemsFor(acc, usage, 22, 700, "detail"))
     page.add(imageRow(detailHeaderImage(acc, usage), 80))
 
     const detail = usage.error || (usage.warnings || []).join(" / ") || null
@@ -2538,7 +2561,7 @@ async function mainMenu() {
 
     page.add(headerRow(`계정 (${accounts.length})`))
     if (!accounts.length) page.add(textRow("아직 계정이 없어요", "아래 '계정 추가'로 시작해 보세요.").row)
-    await measureTexts(accounts.flatMap((acc) => measureItemsFor(acc, usage[acc.id], 17, 600)))
+    await measureTexts(accounts.flatMap((acc) => measureItemsFor(acc, usage[acc.id], 17, 600, "card")))
     for (const acc of accounts) {
       const u = usage[acc.id] || { ...acc, windows: [] }
       const card = accountCard({ ...acc, ...u, label: acc.label }, acc.enabled)
