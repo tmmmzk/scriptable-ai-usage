@@ -1,6 +1,6 @@
 # scriptable-ai-usage
 
-Claude, ChatGPT·Codex, Google Antigravity 구독 사용량과 **초기화권**을 iPhone 홈 화면·잠금 화면에 보여주는 Scriptable 위젯입니다.
+Claude, Codex, Google Antigravity 구독 사용량과 **초기화권**을 iPhone 홈 화면·잠금 화면에 보여주는 Scriptable 위젯입니다.
 리눅스 서버가 사용량을 모아 정리된 API 로 내려줍니다.
 
 ```
@@ -19,7 +19,7 @@ Claude, ChatGPT·Codex, Google Antigravity 구독 사용량과 **초기화권**�
 | 서비스 | 사용량 | 초기화권 | 등록 방식 |
 |---|---|---|---|
 | Claude | 5시간 / 주간 / 모델별 주간, 추가 사용량 | ✅ (sessionKey 필요) | OAuth 로그인, sessionKey |
-| ChatGPT · Codex | 5시간 / 주간 / 모델별 추가 한도, 크레딧 | ✅ | OAuth 로그인 |
+| Codex | 5시간 / 주간 / 모델별 추가 한도, 크레딧 | ✅ | OAuth 로그인 |
 | Antigravity | 그룹별(Gemini / Claude·GPT) 5시간·주간 | – | Google OAuth 로그인 |
 
 ## 1. 서버 설치
@@ -103,6 +103,7 @@ Antigravity 의 Google OAuth 클라이언트 ID/Secret 은 앱 안에 들어 있
 - 상태 표시: "🔑 재로그인" 배지는 재로그인 필요(막대가 회색으로 흐려짐), ⚠︎ 는 일부 조회 실패입니다.
 - 막대 색은 70% 미만 초록, 70% 이상 주황, 90% 이상 빨강입니다.
 - 계정이 많으면 위젯 Parameter 로 보여줄 계정을 고르세요(예: 중형 위젯 두 개에 `개인,회사` / `구글,부계정`).
+- 앱 메인 화면의 **◐ Claude 로고**로 Claude 로고를 Clawd(Claude Code 마스코트)로 바꿀 수 있습니다. 위젯에도 적용됩니다.
 - 로고는 [LobeHub Icons](https://github.com/lobehub/lobe-icons)(MIT)를 PNG 로 변환해 스크립트에 넣었습니다.
 
 ## 동작 방식과 주의점

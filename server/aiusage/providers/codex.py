@@ -28,7 +28,7 @@ REFRESH_MARGIN = 300
 
 class CodexProvider(Provider):
     id = "codex"
-    name = "ChatGPT · Codex"
+    name = "Codex"
 
     # ---------- 로그인 ----------
     def start_login(self, cfg: Config) -> LoginStart:
@@ -242,19 +242,29 @@ def parse_extra(data: dict) -> dict:
 def parse_reset_credits(data: Any, at: float) -> Optional[dict]:
     if not isinstance(data, dict):
         return None
-    expirations: list[Optional[float]] = []
+    items: list[dict] = []
     for credit in data.get("credits") or []:
         if not isinstance(credit, dict) or credit.get("status") != "available":
             continue
         exp = parse_iso(credit.get("expires_at"))
         if exp is not None and exp <= at:
             continue
-        expirations.append(exp)
-    expirations.sort(key=lambda e: (e is None, e or 0))
+        # id 는 사용(redeem)용 핸들이라 내보내지 않는다
+        items.append({
+            "title": credit.get("title") if isinstance(credit.get("title"), str) else None,
+            "description": credit.get("description") if isinstance(credit.get("description"), str) else None,
+            "reset_type": credit.get("reset_type") if isinstance(credit.get("reset_type"), str) else None,
+            "granted_at": iso(parse_iso(credit.get("granted_at"))),
+            "expires_at": iso(exp),
+            "_exp": exp,
+        })
+    items.sort(key=lambda i: (i["_exp"] is None, i["_exp"] or 0))
+    expirations = [i.pop("_exp") for i in items]
     count = data.get("available_count")
     available = count if isinstance(count, int) and count >= 0 else len(expirations)
     return {
         "available": available,
         "next_expires_at": iso(expirations[0]) if expirations and expirations[0] else None,
         "expirations": [iso(e) for e in expirations],
+        "items": items,
     }

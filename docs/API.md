@@ -62,7 +62,13 @@
       "reset_credits": {
         "available": 2,
         "next_expires_at": "2026-10-20T00:00:00Z",
-        "expirations": ["2026-10-20T00:00:00Z", "2026-10-27T00:00:00Z"]
+        "expirations": ["2026-10-20T00:00:00Z", "2026-10-27T00:00:00Z"],
+        "items": [
+          {"title": null, "description": null, "reset_type": null,
+           "granted_at": "2026-09-20T00:00:00Z", "expires_at": "2026-10-20T00:00:00Z"},
+          {"title": null, "description": null, "reset_type": null,
+           "granted_at": "2026-09-27T00:00:00Z", "expires_at": "2026-10-27T00:00:00Z"}
+        ]
       },
       "extra": {}
     }
@@ -86,6 +92,8 @@
 - `reset_credits`
   - `null`: 조회하지 않았거나 대상이 아닙니다. Claude 는 sessionKey 가 없으면 `null`, Antigravity 는 항상 `null` 입니다.
   - `available` 이 0 이면 현재 쓸 수 있는 초기화권이 없습니다.
+  - `items` 는 초기화권 한 장당 하나씩, 만료가 빠른 순서입니다. Codex 는 `title`·`reset_type` 이 채워질 수 있습니다.
+  - 초기화권을 사용할 때 쓰는 ID 는 응답에 넣지 않습니다.
 - `extra`
   - Claude: `extra_usage` (추가 사용량)
   - Codex: `credits` (크레딧 잔액)

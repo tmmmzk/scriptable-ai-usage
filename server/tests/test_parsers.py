@@ -46,6 +46,9 @@ class ClaudeParserTest(unittest.TestCase):
         self.assertEqual(rc["available"], 4)
         self.assertEqual(rc["next_expires_at"], "2026-10-04T00:00:00Z")
         self.assertEqual(rc["expirations"][-1], None)
+        self.assertEqual(len(rc["items"]), 4)
+        self.assertEqual(rc["items"][0]["expires_at"], "2026-10-04T00:00:00Z")
+        self.assertNotIn("id", rc["items"][0])
         self.assertIsNone(claude.parse_reset_credits({"eligible": False, "grants": []}, NOW))
         self.assertIsNone(claude.parse_reset_credits(None, NOW))
 
@@ -80,7 +83,8 @@ class CodexParserTest(unittest.TestCase):
         data = {
             "available_count": 2,
             "credits": [
-                {"id": "1", "status": "available", "expires_at": "2026-10-20T00:00:00Z"},
+                {"id": "1", "status": "available", "expires_at": "2026-10-20T00:00:00Z",
+                 "title": "Usage limit reset", "granted_at": "2026-09-20T00:00:00Z", "reset_type": "weekly"},
                 {"id": "2", "status": "available", "expires_at": "2026-10-10T00:00:00Z"},
                 {"id": "3", "status": "redeemed", "expires_at": "2026-10-10T00:00:00Z"},
             ],
@@ -88,6 +92,10 @@ class CodexParserTest(unittest.TestCase):
         rc = codex.parse_reset_credits(data, NOW)
         self.assertEqual(rc["available"], 2)
         self.assertEqual(rc["next_expires_at"], "2026-10-10T00:00:00Z")
+        self.assertEqual([i["expires_at"] for i in rc["items"]], ["2026-10-10T00:00:00Z", "2026-10-20T00:00:00Z"])
+        self.assertEqual(rc["items"][1]["title"], "Usage limit reset")
+        self.assertEqual(rc["items"][1]["granted_at"], "2026-09-20T00:00:00Z")
+        self.assertNotIn("id", rc["items"][1])
 
     def test_id_token_info(self):
         import base64
