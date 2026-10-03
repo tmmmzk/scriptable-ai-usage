@@ -400,14 +400,6 @@ const STATUS_TEXT = {
   pending: "대기 중",
 }
 
-function statusBadge(acc) {
-  if (acc.status === "ok") return null
-  if (acc.status === "partial") return { text: "⚠︎", color: C.warn }
-  if (acc.status === "needs_login") return { text: "🔑", color: C.bad }
-  if (acc.status === "pending") return { text: "…", color: C.sub }
-  return { text: "⚠︎", color: C.bad }
-}
-
 // ───────────────────────── 위젯 그리기 ─────────────────────────
 // 위젯 크기(pt). iOS 는 기기별로 고정 크기를 쓰므로 화면 폭으로 고른다. 모르는 기기는 비율로 근사.
 const WIDGET_SIZES = {
@@ -533,13 +525,13 @@ function accountHeader(stack, acc, opts) {
   if (rc && rc.available > 0) addPill(row, `초기화권 ${rc.available}`)
   if (acc.status === "needs_login") {
     row.addSpacer(4)
-    addPill(row, "🔑 재로그인", C.bad)
-  } else if (acc.status === "partial" || acc.status === "pending") {
+    addPill(row, "재로그인", C.bad)
+  } else if (acc.status === "partial") {
     row.addSpacer(4)
-    addText(row, "⚠︎", Font.systemFont(12), C.warn)
-  } else if (acc.status !== "ok") {
+    addPill(row, "일부 실패", C.warn)
+  } else if (acc.status !== "ok" && acc.status !== "pending") {
     row.addSpacer(4)
-    addPill(row, `⚠︎ ${STATUS_TEXT[acc.status] || "오류"}`, C.bad)
+    addPill(row, STATUS_TEXT[acc.status] || "오류", C.bad)
   }
   if (opts.extraPill) {
     row.addSpacer(4)
@@ -980,9 +972,9 @@ function accountPills(acc, enabled) {
   const pills = []
   const rc = acc.reset_credits
   if (rc && rc.available > 0) pills.push({ text: `초기화권 ${rc.available}` })
-  if (acc.status === "needs_login") pills.push({ text: "🔑 재로그인", color: C.bad })
-  else if (acc.status === "partial") pills.push({ text: "⚠︎ 일부 실패", color: C.warn })
-  else if (acc.status && !["ok", "pending"].includes(acc.status)) pills.push({ text: `⚠︎ ${STATUS_TEXT[acc.status] || "오류"}`, color: C.bad })
+  if (acc.status === "needs_login") pills.push({ text: "재로그인", color: C.bad })
+  else if (acc.status === "partial") pills.push({ text: "일부 실패", color: C.warn })
+  else if (acc.status && !["ok", "pending"].includes(acc.status)) pills.push({ text: STATUS_TEXT[acc.status] || "오류", color: C.bad })
   if (enabled === false) pills.push({ text: "숨김", color: pal().sub })
   return pills.reverse() // 오른쪽부터 그리므로 뒤집는다
 }
@@ -1045,7 +1037,7 @@ function windowRowImage(w, dim) {
     dim || pct == null || pct < 70 ? p.text : pctColor(pct), "right")
   fillRound(ctx, new Rect(0, 30, W, 8), 4, p.track)
   if (pct != null && pct > 0) fillRound(ctx, new Rect(0, 30, Math.max(8, (W * Math.min(100, pct)) / 100), 8), 4, dim ? p.sub : pctColor(pct))
-  const reset = w.resets_at ? `↻ ${fmtUntil(w.resets_at)} 후 초기화 · ${fmtDate(w.resets_at)}` : "초기화 시각 정보 없음"
+  const reset = w.resets_at ? `${fmtUntil(w.resets_at)} 후 초기화 (${fmtDate(w.resets_at)})` : "초기화 시각 정보 없음"
   drawTextAt(ctx, reset, 0, 42, W, 16, Font.systemFont(11), p.sub)
   return ctx.getImage()
 }
@@ -1181,31 +1173,37 @@ async function accountDetail(accountId) {
       table.addRow(r)
     }
 
-    action("↻ 지금 새로고침", () => api("POST", `/v1/accounts/${accountId}/refresh`, undefined, 60))
-    action("✎ 이름 변경", async () => {
+    action("지금 새로고침", () => api("POST", `/v1/accounts/${accountId}/refresh`, undefined, 60))
+    action("이름 변경", async () => {
       const name = await prompt("이름 변경", "", { value: acc.label })
       if (name) await api("PATCH", `/v1/accounts/${accountId}`, { label: name })
     })
     if (acc.provider !== "claude" || acc.auth.oauth || usage.status === "needs_login") {
-      action("🔑 다시 로그인", () => oauthLogin(acc.provider, { accountId }))
+      action("다시 로그인", () => oauthLogin(acc.provider, { accountId }))
     }
     if (acc.provider === "claude") {
-      action(acc.auth.session_key ? "🍪 sessionKey 교체" : "🍪 sessionKey 설정 (초기화권)", async () => {
+      const setKey = async () => {
         const key = await prompt("sessionKey", SESSION_KEY_HELP, { secure: true, placeholder: "sk-ant-..." })
         if (key) await api("PATCH", `/v1/accounts/${accountId}`, { session_key: key }, 60)
-      })
-      if (acc.auth.session_key && acc.auth.oauth) {
-        action("🍪 sessionKey 제거", async () => {
-          if (await confirm("sessionKey 제거", "초기화권 표시가 사라집니다.", "제거", true))
+      }
+      if (!acc.auth.session_key) {
+        action("sessionKey 설정 (초기화권 표시)", setKey)
+      } else {
+        action("sessionKey 관리", async () => {
+          // OAuth 가 없는 계정은 sessionKey 가 유일한 인증이라 제거할 수 없다
+          const opts = acc.auth.oauth ? ["교체", "제거"] : ["교체"]
+          const i = await choose("sessionKey", "초기화권 조회에 쓰는 claude.ai 쿠키입니다.", opts)
+          if (i === 0) await setKey()
+          if (i === 1 && (await confirm("sessionKey 제거", "초기화권 표시가 사라집니다.", "제거", true)))
             await api("PATCH", `/v1/accounts/${accountId}`, { session_key: "" })
         })
       }
     }
-    action(acc.enabled ? "⏸ 위젯에서 숨기기" : "▶︎ 위젯에 다시 표시", () =>
+    action(acc.enabled ? "위젯에서 숨기기" : "위젯에 다시 표시", () =>
       api("PATCH", `/v1/accounts/${accountId}`, { enabled: !acc.enabled })
     )
     action(
-      "🗑 계정 삭제",
+      "계정 삭제",
       async () => {
         if (await confirm("계정 삭제", `${acc.label} 계정과 저장된 토큰을 서버에서 삭제합니다.`, "삭제", true)) {
           await api("DELETE", `/v1/accounts/${accountId}`)
@@ -1222,6 +1220,32 @@ async function accountDetail(accountId) {
   if (!(await guarded(render))) return
   await table.present(false)
   closed = true
+}
+
+// ───────────────────────── 앱 UI: 설정 메뉴 ─────────────────────────
+// 자주 쓰지 않는 항목을 모은다. 화면을 다시 그려야 하면 true.
+async function settingsMenu() {
+  const items = []
+  items.push(isDemo()
+    ? { label: "서버 연결 (데모 종료)", run: () => setupServer() }
+    : { label: "서버 주소 / API 키 변경", run: () => setupServer() })
+  items.push({
+    label: `Claude 로고 바꾸기 (현재: ${claudeLogo() === "clawd" ? "Clawd" : "기본"})`,
+    run: () => {
+      setClaudeLogo(claudeLogo() === "clawd" ? "default" : "clawd")
+      logoCache = {}
+    },
+  })
+  if (isDemo()) {
+    items.push({ label: "데모 데이터 초기화", run: () => demoReset() })
+    if (Keychain.contains(KC_SERVER)) items.push({ label: "데모 종료 (기존 서버로)", run: () => setDemo(false) })
+  } else {
+    items.push({ label: "데모 모드로 보기", run: () => setDemo(true) })
+  }
+  const i = await choose("설정", `v${VERSION}`, items.map((x) => x.label))
+  if (i < 0) return false
+  await items[i].run()
+  return true
 }
 
 // ───────────────────────── 앱 UI: 메인 ─────────────────────────
@@ -1253,7 +1277,7 @@ async function mainMenu() {
       const r = new UITableRow()
       r.height = 54
       r.backgroundColor = new Color("#FF9F0A", 0.15)
-      const c = r.addText("🧪 데모 모드", "가짜 데이터입니다. 변경 내용은 이 기기에만 저장됩니다.")
+      const c = r.addText("데모 모드", "가짜 데이터입니다. 설정에서 끌 수 있어요.")
       c.titleColor = new Color("#FF9F0A")
       table.addRow(r)
     }
@@ -1273,7 +1297,7 @@ async function mainMenu() {
     if (errorMsg) {
       const r = new UITableRow()
       r.height = 60
-      const c = r.addText("⚠︎ 서버 오류", errorMsg)
+      const c = r.addText("서버 오류", errorMsg)
       c.titleColor = Color.red()
       table.addRow(r)
     }
@@ -1315,49 +1339,21 @@ async function mainMenu() {
       }
       table.addRow(r)
     }
-    action("＋ 계정 추가", async () => {
+    action("계정 추가", async () => {
       await addAccount()
       await render(false)
     })
-    action("↻ 전체 새로고침", () => render(true))
-    action(`◐ Claude 로고: ${claudeLogo() === "clawd" ? "Clawd" : "기본"} (눌러서 변경)`, async () => {
-      setClaudeLogo(claudeLogo() === "clawd" ? "default" : "clawd")
-      logoCache = {}
-      await render(false)
+    action("전체 새로고침", () => render(true))
+    action("위젯 미리보기", async () => {
+      const i = await choose("위젯 미리보기", null, ["소형", "중형", "대형"])
+      if (i < 0) return
+      const size = ["small", "medium", "large"][i]
+      const w = buildHomeWidget(await loadUsage(false), size, "")
+      await [() => w.presentSmall(), () => w.presentMedium(), () => w.presentLarge()][i]()
     })
-    action("▦ 위젯 미리보기 (중형)", async () => {
-      const w = buildHomeWidget(await loadUsage(false), "medium", "")
-      await w.presentMedium()
+    action("설정", async () => {
+      if (await settingsMenu()) await render(false)
     })
-    action("▦ 위젯 미리보기 (소형)", async () => {
-      const w = buildHomeWidget(await loadUsage(false), "small", "")
-      await w.presentSmall()
-    })
-    action("▦ 위젯 미리보기 (대형)", async () => {
-      const w = buildHomeWidget(await loadUsage(false), "large", "")
-      await w.presentLarge()
-    })
-    action(isDemo() ? "⚙︎ 서버 연결 (데모 종료)" : "⚙︎ 서버 설정", async () => {
-      await setupServer()
-      await render(false)
-    })
-    if (isDemo()) {
-      action("🧪 데모 데이터 초기화", async () => {
-        demoReset()
-        await render(false)
-      })
-      if (Keychain.contains(KC_SERVER)) {
-        action("🧪 데모 종료 (기존 서버로)", async () => {
-          setDemo(false)
-          await render(false)
-        })
-      }
-    } else {
-      action("🧪 데모 모드로 보기", async () => {
-        setDemo(true)
-        await render(false)
-      })
-    }
     table.reload()
   }
 
