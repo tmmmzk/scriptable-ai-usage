@@ -7,6 +7,7 @@
 //
 // • 앱에서 실행하면 설정·계정 관리 화면이 열립니다.
 // • 위젯 Parameter 에 계정 이름(또는 id)을 쉼표로 적으면 그 계정만 표시합니다. 예) 개인,회사
+// • 서버 없이 디자인만 보려면 앱에서 '데모 모드'를 켜거나, 위젯 Parameter 에 demo 를 적으세요.
 
 const VERSION = "0.1.0"
 const KC_SERVER = "aiusage.server"
@@ -31,7 +32,22 @@ const C = {
 }
 
 // ───────────────────────── 설정 / API ─────────────────────────
+// 데모 모드: 서버 없이 가짜 데이터로 위젯·앱 UI 를 확인한다.
+// 앱 첫 화면에서 켜거나, 위젯 Parameter 에 `demo` 를 적으면 그 위젯만 데모로 그린다.
+const KC_DEMO = "aiusage.demo"
+let FORCE_DEMO = false
+
+function isDemo() {
+  return FORCE_DEMO || (Keychain.contains(KC_DEMO) && Keychain.get(KC_DEMO) === "1")
+}
+
+function setDemo(on) {
+  if (on) Keychain.set(KC_DEMO, "1")
+  else if (Keychain.contains(KC_DEMO)) Keychain.remove(KC_DEMO)
+}
+
 function getConfig() {
+  if (isDemo()) return { server: "데모 모드", apiKey: "demo", demo: true }
   const server = Keychain.contains(KC_SERVER) ? Keychain.get(KC_SERVER) : null
   const apiKey = Keychain.contains(KC_KEY) ? Keychain.get(KC_KEY) : null
   return server && apiKey ? { server, apiKey } : null
@@ -44,9 +60,202 @@ class ApiError extends Error {
   }
 }
 
+// ── 데모용 가짜 서버 (상태는 기기 로컬 파일에 저장) ──
+const DEMO_FILE = "aiusage-demo.json"
+const H = 3600
+const D = 86400
+
+function demoWin(key, label, used, resetIn, opts = {}) {
+  return { key, label, group: opts.group || null, used_percent: used, remaining_percent: used == null ? null : 100 - used,
+    reset_in: resetIn, window_seconds: opts.seconds || null, primary: !!opts.primary }
+}
+
+function demoSeed() {
+  return [
+    { id: "claude_demo1", provider: "claude", label: "개인", email: "me@example.com", plan: "max", enabled: true,
+      status: "ok", auth: { oauth: true, session_key: true, reset_credits_supported: true },
+      windows: [demoWin("session", "5시간", 42, 2 * H + 13 * 60, { primary: true, seconds: 5 * H }),
+        demoWin("weekly", "주간", 68, 3 * D + 11 * H, { primary: true, seconds: 7 * D }),
+        demoWin("weekly_opus", "Opus 주간", 23, 3 * D + 11 * H, { seconds: 7 * D })],
+      reset_credits: { available: 2, expires_in: [5 * D, 12 * D] },
+      extra: { extra_usage: { used: 12.4, limit: 50, used_percent: 24.8, currency: "USD" } } },
+    { id: "codex_demo1", provider: "codex", label: "회사", email: "work@example.com", plan: "plus", enabled: true,
+      status: "ok", auth: { oauth: true, reset_credits_supported: true },
+      windows: [demoWin("session", "5시간", 93, 47 * 60, { primary: true, seconds: 5 * H }),
+        demoWin("weekly", "주간", 77, 5 * D + 2 * H, { primary: true, seconds: 7 * D }),
+        demoWin("spark:session", "5시간", 4, 47 * 60, { group: "GPT-5.3-Codex-Spark", seconds: 5 * H })],
+      reset_credits: { available: 1, expires_in: [20 * D] }, extra: { credits: { unlimited: false, balance: 3.5 } } },
+    { id: "ag_demo1", provider: "antigravity", label: "구글", email: "me@gmail.com", plan: "Paid", enabled: true,
+      status: "partial", warnings: ["요약 조회 실패, 모델별 조회로 대체"], auth: { oauth: true, reset_credits_supported: false },
+      windows: [demoWin("gemini:5h", "5시간", 55, 3 * H, { group: "Gemini Models", primary: true, seconds: 5 * H }),
+        demoWin("gemini:wk", "주간", 31, 6 * D, { group: "Gemini Models", seconds: 7 * D }),
+        demoWin("claude_gpt:5h", "5시간", 12, 3 * H, { group: "Claude and GPT models", primary: true, seconds: 5 * H })],
+      reset_credits: null, extra: {} },
+    { id: "claude_demo2", provider: "claude", label: "부계정", email: "alt@example.com", plan: "pro", enabled: true,
+      status: "needs_login", stale: true, error: "토큰 갱신 거부(HTTP 400). 다시 로그인하세요.",
+      auth: { oauth: true, session_key: false, reset_credits_supported: false },
+      windows: [demoWin("session", "5시간", 8, 4 * H, { primary: true, seconds: 5 * H }),
+        demoWin("weekly", "주간", 15, 6 * D, { primary: true, seconds: 7 * D })],
+      reset_credits: null, extra: {} },
+  ]
+}
+
+function demoLoad() {
+  const p = fm.joinPath(fm.documentsDirectory(), DEMO_FILE)
+  try {
+    if (fm.fileExists(p)) return JSON.parse(fm.readString(p))
+  } catch (e) {}
+  return { accounts: demoSeed(), updated: Date.now() }
+}
+
+function demoSave(state) {
+  fm.writeString(fm.joinPath(fm.documentsDirectory(), DEMO_FILE), JSON.stringify(state))
+}
+
+function demoReset() {
+  const p = fm.joinPath(fm.documentsDirectory(), DEMO_FILE)
+  if (fm.fileExists(p)) fm.remove(p)
+}
+
+const PROVIDER_NAMES = { claude: "Claude", codex: "ChatGPT · Codex", antigravity: "Antigravity" }
+
+function demoUsage(a, updated) {
+  const at = (sec) => (sec == null ? null : new Date(updated + sec * 1000).toISOString())
+  const ts = new Date(updated).toISOString()
+  return {
+    id: a.id, provider: a.provider, provider_name: PROVIDER_NAMES[a.provider], label: a.label, email: a.email,
+    plan: a.plan, status: a.status, error: a.error || null, warnings: a.warnings || [], stale: !!a.stale,
+    fetched_at: ts, last_success_at: a.stale ? new Date(updated - 2 * D * 1000).toISOString() : ts,
+    windows: a.windows.map((w) => ({ ...w, resets_at: at(w.reset_in) })),
+    reset_credits: a.reset_credits && {
+      available: a.reset_credits.available,
+      next_expires_at: at(a.reset_credits.expires_in[0]),
+      expirations: a.reset_credits.expires_in.map(at),
+    },
+    extra: a.extra || {},
+  }
+}
+
+function demoAccount(a, updated) {
+  const u = demoUsage(a, updated)
+  return { id: a.id, provider: a.provider, provider_name: u.provider_name, label: a.label, email: a.email, plan: a.plan,
+    enabled: a.enabled, auth: a.auth, status: a.status, error: u.error, fetched_at: u.fetched_at,
+    last_success_at: u.last_success_at }
+}
+
+function demoNewAccount(provider, label) {
+  const n = Math.floor(Math.random() * 1000)
+  const rnd = () => Math.round(Math.random() * 90)
+  const base = { id: `${provider}_demo${n}`, provider, label: label || `${PROVIDER_NAMES[provider]} ${n}`,
+    email: `demo${n}@example.com`, plan: null, enabled: true, status: "ok", extra: {} }
+  if (provider === "antigravity") {
+    return { ...base, auth: { oauth: true, reset_credits_supported: false }, reset_credits: null,
+      windows: [demoWin("gemini:5h", "5시간", rnd(), 2 * H, { group: "Gemini Models", primary: true, seconds: 5 * H }),
+        demoWin("claude_gpt:5h", "5시간", rnd(), 2 * H, { group: "Claude and GPT models", primary: true, seconds: 5 * H })] }
+  }
+  return { ...base, auth: { oauth: true, session_key: false, reset_credits_supported: provider === "codex" },
+    reset_credits: provider === "codex" ? { available: 0, expires_in: [] } : null,
+    windows: [demoWin("session", "5시간", rnd(), 3 * H, { primary: true, seconds: 5 * H }),
+      demoWin("weekly", "주간", rnd(), 4 * D, { primary: true, seconds: 7 * D })] }
+}
+
+async function demoApi(method, path, body) {
+  const state = demoLoad()
+  const { accounts } = state
+  const find = (id) => {
+    const a = accounts.find((x) => x.id === id)
+    if (!a) throw new ApiError("계정이 없습니다.", 404)
+    return a
+  }
+  const save = () => demoSave(state)
+  const route = `${method} ${path.split("?")[0]}`
+  let m
+
+  if (route === "GET /v1/usage") {
+    if (path.includes("refresh=1")) {
+      state.updated = Date.now()
+      save()
+    }
+    return { generated_at: new Date(state.updated).toISOString(), poll_interval: 300,
+      accounts: accounts.filter((a) => a.enabled).map((a) => demoUsage(a, state.updated)) }
+  }
+  if (route === "GET /v1/providers") {
+    return { providers: [
+      { id: "claude", name: "Claude", methods: ["oauth", "session_key"], configured: true, reason: null },
+      { id: "codex", name: "ChatGPT · Codex", methods: ["oauth"], configured: true, reason: null },
+      { id: "antigravity", name: "Antigravity", methods: ["oauth"], configured: true, reason: null },
+    ] }
+  }
+  if (route === "GET /v1/accounts") return { accounts: accounts.map((a) => demoAccount(a, state.updated)) }
+  if (route === "POST /v1/accounts") {
+    if (!String(body.session_key || "").startsWith("sk-ant-")) throw new ApiError("sessionKey 는 'sk-ant-' 로 시작해야 합니다.", 400)
+    const a = demoNewAccount("claude", body.label)
+    a.auth = { oauth: false, session_key: true, reset_credits_supported: true }
+    a.reset_credits = { available: 1, expires_in: [9 * D] }
+    accounts.push(a)
+    save()
+    return demoAccount(a, state.updated)
+  }
+  if (route === "POST /v1/logins") {
+    const loginId = `demo${Date.now()}`
+    state.logins = state.logins || {}
+    state.logins[loginId] = { provider: body.provider, label: body.label, accountId: body.account_id }
+    save()
+    return { login_id: loginId, provider: body.provider, authorize_url: null,
+      instructions: "데모 모드에서는 실제 로그인 페이지를 열지 않습니다.",
+      input_hint: "아무 값이나 입력하면 로그인된 것으로 처리합니다." }
+  }
+  if ((m = route.match(/^POST \/v1\/logins\/([\w-]+)\/complete$/))) {
+    const pending = (state.logins || {})[m[1]]
+    if (!pending) throw new ApiError("로그인 세션이 없거나 만료되었습니다.", 400)
+    delete state.logins[m[1]]
+    const { provider, label, accountId } = pending
+    if (accountId) {
+      const a = find(accountId)
+      Object.assign(a, { status: "ok", stale: false, error: null })
+      save()
+      return demoAccount(a, state.updated)
+    }
+    const a = demoNewAccount(provider, label)
+    accounts.push(a)
+    save()
+    return demoAccount(a, state.updated)
+  }
+  if ((m = route.match(/^GET \/v1\/accounts\/([\w-]+)$/))) {
+    const a = find(m[1])
+    return { account: demoAccount(a, state.updated), usage: demoUsage(a, state.updated) }
+  }
+  if ((m = route.match(/^PATCH \/v1\/accounts\/([\w-]+)$/))) {
+    const a = find(m[1])
+    if (body.label) a.label = body.label
+    if ("enabled" in body) a.enabled = !!body.enabled
+    if ("session_key" in body) {
+      a.auth.session_key = !!body.session_key
+      a.auth.reset_credits_supported = !!body.session_key
+      a.reset_credits = body.session_key ? { available: 1, expires_in: [7 * D] } : null
+    }
+    save()
+    return demoAccount(a, state.updated)
+  }
+  if ((m = route.match(/^DELETE \/v1\/accounts\/([\w-]+)$/))) {
+    find(m[1])
+    state.accounts = accounts.filter((a) => a.id !== m[1])
+    save()
+    return { deleted: m[1] }
+  }
+  if ((m = route.match(/^POST \/v1\/accounts\/([\w-]+)\/refresh$/))) {
+    const a = find(m[1])
+    for (const w of a.windows) w.used_percent = Math.min(100, Math.round((w.used_percent || 0) + Math.random() * 5))
+    save()
+    return demoUsage(a, state.updated)
+  }
+  throw new ApiError(`데모에서 지원하지 않는 요청: ${route}`, 404)
+}
+
 async function api(method, path, body, timeout = 25) {
   const cfg = getConfig()
   if (!cfg) throw new ApiError("서버 설정이 필요합니다.", 0)
+  if (cfg.demo) return demoApi(method, path, body || {})
   const req = new Request(cfg.server.replace(/\/+$/, "") + path)
   req.method = method
   req.timeoutInterval = timeout
@@ -87,7 +296,7 @@ function writeCache(data) {
 async function loadUsage(refresh = false) {
   try {
     const data = await api("GET", `/v1/usage${refresh ? "?refresh=1" : ""}`, undefined, refresh ? 40 : 15)
-    writeCache(data)
+    if (!isDemo()) writeCache(data)
     return { data, offline: false }
   } catch (e) {
     const cached = readCache()
@@ -364,7 +573,12 @@ function buildAccessoryWidget(result, family, param) {
 
 async function runWidget() {
   const family = config.widgetFamily || "medium"
-  const param = (args.widgetParameter || "").trim()
+  let param = (args.widgetParameter || "").trim()
+  const parts = param.split(",").map((x) => x.trim())
+  if (parts.includes("demo")) {
+    FORCE_DEMO = true
+    param = parts.filter((x) => x && x !== "demo").join(",")
+  }
   let widget
   if (!getConfig()) {
     widget = emptyWidget("Scriptable 앱에서 이 스크립트를 실행해 서버를 설정하세요.")
@@ -432,7 +646,8 @@ async function guarded(fn) {
 
 // ───────────────────────── 앱 UI: 설정 ─────────────────────────
 async function setupServer() {
-  const cur = getConfig() || {}
+  const cfg = getConfig()
+  const cur = cfg && !cfg.demo ? cfg : {}
   const server = await prompt("서버 주소", "리버스 프록시 뒤의 서버 URL\n예) https://ai.example.com", {
     placeholder: "https://",
     value: cur.server || "",
@@ -445,6 +660,7 @@ async function setupServer() {
   if (!key) return false
   Keychain.set(KC_SERVER, server.replace(/\/+$/, ""))
   Keychain.set(KC_KEY, key)
+  setDemo(false)
   try {
     await api("GET", "/v1/accounts")
     await alertMsg("연결 성공", "서버에 연결되었습니다.")
@@ -458,13 +674,16 @@ async function setupServer() {
 // ───────────────────────── 앱 UI: 로그인 ─────────────────────────
 async function oauthLogin(provider, { label, accountId } = {}) {
   const start = await api("POST", "/v1/logins", { provider, label: label || undefined, account_id: accountId })
+  const hasPage = !!start.authorize_url
   const go = new Alert()
   go.title = "로그인"
-  go.message = `${start.instructions}\n\n1) '로그인 페이지 열기'를 누르세요.\n2) 로그인을 마친 뒤 안내된 값을 복사하세요.\n3) Scriptable 로 돌아와 붙여넣으세요.`
-  go.addAction("로그인 페이지 열기")
+  go.message = hasPage
+    ? `${start.instructions}\n\n1) '로그인 페이지 열기'를 누르세요.\n2) 로그인을 마친 뒤 안내된 값을 복사하세요.\n3) Scriptable 로 돌아와 붙여넣으세요.`
+    : start.instructions
+  go.addAction(hasPage ? "로그인 페이지 열기" : "계속")
   go.addCancelAction("취소")
   if ((await go.presentAlert()) !== 0) return null
-  Safari.open(start.authorize_url)
+  if (hasPage) Safari.open(start.authorize_url)
 
   while (true) {
     const a = new Alert()
@@ -472,7 +691,7 @@ async function oauthLogin(provider, { label, accountId } = {}) {
     a.message = `${start.input_hint}\n\n복사했다면 '클립보드에서 붙여넣기'를 누르세요.`
     a.addAction("클립보드에서 붙여넣기")
     a.addAction("직접 입력")
-    a.addAction("로그인 페이지 다시 열기")
+    if (hasPage) a.addAction("로그인 페이지 다시 열기")
     a.addCancelAction("취소")
     const i = await a.presentAlert()
     if (i === -1) return null
@@ -667,8 +886,14 @@ async function accountDetail(accountId) {
 // ───────────────────────── 앱 UI: 메인 ─────────────────────────
 async function mainMenu() {
   if (!getConfig()) {
-    await alertMsg("처음 설정", "사용량 서버 주소와 API 키를 입력하세요.")
-    if (!(await setupServer())) return
+    const i = await choose(
+      "처음 설정",
+      "사용량 서버에 연결하거나, 서버 없이 가짜 데이터로 UI 와 위젯을 먼저 둘러볼 수 있습니다.",
+      ["서버 연결", "데모 모드로 둘러보기"],
+      false
+    )
+    if (i === 1) setDemo(true)
+    else if (i !== 0 || !(await setupServer())) return
   }
 
   const table = new UITable()
@@ -682,6 +907,15 @@ async function mainMenu() {
     const h = head.addText("AI 사용량", `${getConfig().server}  ·  v${VERSION}`)
     h.titleFont = Font.boldSystemFont(22)
     table.addRow(head)
+
+    if (isDemo()) {
+      const r = new UITableRow()
+      r.height = 54
+      r.backgroundColor = new Color("#FF9F0A", 0.15)
+      const c = r.addText("🧪 데모 모드", "가짜 데이터입니다. 변경 내용은 이 기기에만 저장됩니다.")
+      c.titleColor = new Color("#FF9F0A")
+      table.addRow(r)
+    }
 
     let accounts = []
     let usage = {}
@@ -766,10 +1000,27 @@ async function mainMenu() {
       const w = buildHomeWidget(await loadUsage(false), "large", "")
       await w.presentLarge()
     })
-    action("⚙︎ 서버 설정", async () => {
+    action(isDemo() ? "⚙︎ 서버 연결 (데모 종료)" : "⚙︎ 서버 설정", async () => {
       await setupServer()
       await render(false)
     })
+    if (isDemo()) {
+      action("🧪 데모 데이터 초기화", async () => {
+        demoReset()
+        await render(false)
+      })
+      if (Keychain.contains(KC_SERVER)) {
+        action("🧪 데모 종료 (기존 서버로)", async () => {
+          setDemo(false)
+          await render(false)
+        })
+      }
+    } else {
+      action("🧪 데모 모드로 보기", async () => {
+        setDemo(true)
+        await render(false)
+      })
+    }
     table.reload()
   }
 
