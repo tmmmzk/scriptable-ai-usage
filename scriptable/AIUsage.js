@@ -25,7 +25,9 @@ const C = {
   bg: Color.dynamic(new Color("#FFFFFF"), new Color("#1C1C1E")),
   text: Color.dynamic(new Color("#1C1C1E"), new Color("#F2F2F7")),
   sub: Color.dynamic(new Color("#6E6E73"), new Color("#98989F")),
+  // DrawContext 이미지에는 dynamic 색이 적용되지 않으므로 양쪽 모드에서 보이는 반투명 단색
   track: new Color("#8E8E93", 0.25),
+  pill: Color.dynamic(new Color("#787880", 0.14), new Color("#787880", 0.28)),
   ok: new Color("#34C759"),
   warn: new Color("#FF9F0A"),
   bad: new Color("#FF453A"),
@@ -327,7 +329,7 @@ function fmtUntil(iso, compact = false) {
   const h = Math.floor((m % 1440) / 60)
   const mm = m % 60
   if (d > 0) return compact ? `${d}일${h ? ` ${h}h` : ""}` : `${d}일 ${h}시간`
-  if (h > 0) return compact ? `${h}h ${mm}m` : `${h}시간 ${mm}분`
+  if (h > 0) return compact ? `${h}h${mm ? ` ${mm}m` : ""}` : `${h}시간${mm ? ` ${mm}분` : ""}`
   return compact ? `${mm}m` : `${mm}분`
 }
 
@@ -385,6 +387,49 @@ function textBar(p, len = 10) {
 }
 
 // ───────────────────────── 위젯 그리기 ─────────────────────────
+// 위젯 크기(pt). iOS 는 기기별로 고정 크기를 쓰므로 화면 폭으로 고른다. 모르는 기기는 비율로 근사.
+const WIDGET_SIZES = {
+  440: { small: 170, medium: 364, large: 382 },
+  430: { small: 170, medium: 364, large: 382 },
+  428: { small: 170, medium: 364, large: 382 },
+  414: { small: 169, medium: 360, large: 379 },
+  402: { small: 162, medium: 345, large: 362 },
+  393: { small: 158, medium: 338, large: 354 },
+  390: { small: 158, medium: 338, large: 354 },
+  375: { small: 155, medium: 329, large: 345 },
+}
+
+function widgetSize(family) {
+  const w = Math.round(Math.min(Device.screenSize().width, Device.screenSize().height))
+  const s = WIDGET_SIZES[w] || { small: Math.round(w * 0.4), medium: Math.round(w * 0.86), large: Math.round(w * 0.9) }
+  if (family === "small") return { w: s.small, h: s.small }
+  if (family === "large" || family === "extraLarge") return { w: s.medium, h: s.large }
+  return { w: s.medium, h: s.small }
+}
+
+const LAYOUT = {
+  small: { pad: 14, accounts: 1, gap: 0 },
+  medium: { pad: 16, accounts: 2, gap: 14 },
+  large: { pad: 16, accounts: 4, gap: 16 },
+}
+const CELL_GAP = 14
+
+let logoCache = {}
+function logoImage(provider) {
+  if (!LOGOS[provider]) return null
+  if (!logoCache[provider]) logoCache[provider] = Image.fromData(Data.fromBase64String(LOGOS[provider]))
+  return logoCache[provider]
+}
+
+function addLogo(stack, provider, size, tint) {
+  const img = logoImage(provider)
+  if (!img) return
+  const el = stack.addImage(img)
+  el.imageSize = new Size(size, size)
+  // OpenAI 로고는 단색이라 글자색(라이트/다크 자동)으로 칠한다
+  if (provider === "codex") el.tintColor = tint || C.text
+}
+
 function barImage(pct, width, height, color) {
   const ctx = new DrawContext()
   ctx.size = new Size(width, height)
@@ -413,77 +458,112 @@ function addText(stack, text, font, color, opts = {}) {
   t.textColor = color
   t.lineLimit = 1
   if (opts.minScale) t.minimumScaleFactor = opts.minScale
-  if (opts.right) t.rightAlignText()
+  if (opts.opacity != null) t.textOpacity = opts.opacity
   return t
 }
 
-function accountHeader(stack, acc, fontSize) {
+function addPill(stack, text, color) {
+  const pill = stack.addStack()
+  pill.backgroundColor = C.pill
+  pill.cornerRadius = 8
+  pill.setPadding(2, 6, 2, 6)
+  addText(pill, text, Font.semiboldSystemFont(10.5), color || C.text)
+  return pill
+}
+
+function accountHeader(stack, acc, opts) {
   const row = stack.addStack()
   row.layoutHorizontally()
   row.centerAlignContent()
-  const style = PROVIDER_STYLE[acc.provider] || { color: "#8E8E93", short: acc.provider }
-  addText(row, "●", Font.systemFont(fontSize - 2), new Color(style.color))
-  row.addSpacer(4)
-  addText(row, acc.label || style.short, Font.semiboldSystemFont(fontSize), C.text, { minScale: 0.7 })
-  row.addSpacer(4)
-  addText(row, style.short, Font.systemFont(fontSize - 3), C.sub, { minScale: 0.7 })
+  row.size = new Size(opts.width, 18)
+  const style = PROVIDER_STYLE[acc.provider] || { short: acc.provider }
+  addLogo(row, acc.provider, opts.logo)
+  row.addSpacer(6)
+  addText(row, acc.label || style.short, Font.semiboldSystemFont(14), C.text, {
+    minScale: 0.7,
+    opacity: opts.dim ? 0.55 : 1,
+  })
+  if (opts.showProvider) {
+    row.addSpacer(6)
+    addText(row, style.short, Font.systemFont(11), C.sub, { minScale: 0.8 })
+  }
   row.addSpacer()
   const rc = acc.reset_credits
-  if (rc && rc.available > 0) {
-    addText(row, `🎟${rc.available}`, Font.mediumSystemFont(fontSize - 2), C.text)
-    row.addSpacer(3)
+  if (rc && rc.available > 0) addPill(row, `🎟 ${rc.available}`)
+  if (acc.status === "needs_login") {
+    row.addSpacer(4)
+    addPill(row, "🔑 재로그인", C.bad)
+  } else if (acc.status === "partial" || acc.status === "pending") {
+    row.addSpacer(4)
+    addText(row, "⚠︎", Font.systemFont(12), C.warn)
+  } else if (acc.status !== "ok") {
+    row.addSpacer(4)
+    addPill(row, `⚠︎ ${STATUS_TEXT[acc.status] || "오류"}`, C.bad)
   }
-  const badge = statusBadge(acc)
-  if (badge) addText(row, badge.text, Font.systemFont(fontSize - 2), badge.color)
+  if (opts.extraPill) {
+    row.addSpacer(4)
+    addPill(row, opts.extraPill, C.warn)
+  }
   return row
 }
 
-function windowLine(stack, w, barWidth, fontSize, dim) {
-  const line = stack.addStack()
-  line.layoutHorizontally()
-  line.centerAlignContent()
-  const label = addText(line, windowTitle(w), Font.systemFont(fontSize - 2), C.sub, { minScale: 0.6 })
-  label.lineLimit = 1
-  line.addSpacer(4)
-  const img = line.addImage(barImage(w.used_percent, barWidth, 5, dim ? C.sub : pctColor(w.used_percent)))
-  img.imageSize = new Size(barWidth, 5)
-  line.addSpacer(4)
-  addText(line, fmtPct(w.used_percent), Font.semiboldMonospacedSystemFont(fontSize - 1), C.text)
-  return line
+function windowCell(parent, w, width, dim) {
+  const cell = parent.addStack()
+  cell.layoutVertically()
+  cell.size = new Size(width, 0)
+
+  const top = cell.addStack()
+  top.layoutHorizontally()
+  top.bottomAlignContent()
+  top.size = new Size(width, 0)
+  const until = fmtUntil(w.resets_at, true)
+  addText(top, windowTitle(w), Font.systemFont(11), C.sub, { minScale: 0.7 })
+  if (until) addText(top, ` · ${until}`, Font.systemFont(11), C.sub, { minScale: 0.7, opacity: 0.75 })
+  top.addSpacer()
+  const pctColorFor = dim || w.used_percent == null || w.used_percent < 70 ? C.text : pctColor(w.used_percent)
+  const num = w.used_percent == null ? "–" : String(Math.round(w.used_percent))
+  addText(top, num, Font.semiboldSystemFont(14), pctColorFor, { opacity: dim ? 0.55 : 1 })
+  if (w.used_percent != null) addText(top, "%", Font.semiboldSystemFont(10), pctColorFor, { opacity: dim ? 0.55 : 1 })
+
+  cell.addSpacer(5)
+  const bar = cell.addImage(barImage(w.used_percent, width, 6, dim ? C.sub : pctColor(w.used_percent)))
+  bar.imageSize = new Size(width, 6)
+  return cell
 }
 
-function accountBlock(parent, acc, size) {
-  const fontSize = size === "small" ? 12 : 13
+function accountBlock(parent, acc, family, inner, extraPill) {
+  const dim = acc.stale || acc.status === "needs_login"
   const block = parent.addStack()
   block.layoutVertically()
-  block.spacing = 2
-  accountHeader(block, acc, fontSize)
+  accountHeader(block, acc, {
+    width: inner,
+    logo: family === "small" ? 16 : 18,
+    showProvider: family !== "small",
+    dim,
+    extraPill,
+  })
   const ws = primaryWindows(acc)
-  const dim = acc.stale || acc.status === "needs_login"
   if (!ws.length) {
-    addText(block, acc.error || STATUS_TEXT[acc.status] || "데이터 없음", Font.systemFont(fontSize - 3), C.sub)
+    block.addSpacer(7)
+    addText(block, acc.error || STATUS_TEXT[acc.status] || "데이터 없음", Font.systemFont(11), C.sub)
     return block
   }
-  if (size === "small") {
+  if (family === "small") {
+    // 소형: 폭이 좁아 두 한도를 위아래로
     for (const w of ws) {
-      const l = windowLine(block, w, 58, fontSize, dim)
-      l.addSpacer()
+      block.addSpacer(10)
+      windowCell(block, w, inner, dim)
     }
     return block
   }
-  // 중·대형: 한 줄에 창 두 개 + 초기화까지 남은 시간
+  block.addSpacer(7)
   const row = block.addStack()
   row.layoutHorizontally()
-  row.centerAlignContent()
+  const cellW = Math.floor((inner - CELL_GAP) / 2)
   ws.forEach((w, i) => {
-    if (i > 0) row.addSpacer(10)
-    const cell = row.addStack()
-    cell.layoutVertically()
-    windowLine(cell, w, 62, fontSize, dim)
-    const until = fmtUntil(w.resets_at, true)
-    addText(cell, until ? `↻ ${until}` : " ", Font.systemFont(fontSize - 4), C.sub)
+    if (i > 0) row.addSpacer(CELL_GAP)
+    windowCell(row, w, cellW, dim)
   })
-  row.addSpacer()
   return block
 }
 
@@ -499,7 +579,8 @@ function filterAccounts(accounts, param) {
 function emptyWidget(message) {
   const w = new ListWidget()
   w.backgroundColor = C.bg
-  addText(w, "AI 사용량", Font.semiboldSystemFont(13), C.text)
+  w.setPadding(16, 16, 16, 16)
+  addText(w, "AI 사용량", Font.semiboldSystemFont(14), C.text)
   w.addSpacer(6)
   const t = addText(w, message, Font.systemFont(11), C.sub)
   t.lineLimit = 4
@@ -511,31 +592,43 @@ function buildHomeWidget(result, size, param) {
   const accounts = filterAccounts(data.accounts || [], param)
   if (!accounts.length) return emptyWidget("표시할 계정이 없습니다. Scriptable 앱에서 계정을 추가하세요.")
 
+  const family = size === "extraLarge" ? "large" : LAYOUT[size] ? size : "medium"
+  const L = LAYOUT[family]
+  const inner = widgetSize(family).w - L.pad * 2
+
   const w = new ListWidget()
   w.backgroundColor = C.bg
-  w.setPadding(12, 14, 12, 14)
-  const capacity = { small: 2, medium: 3, large: 7, extraLarge: 7 }[size] || 3
+  w.setPadding(L.pad, L.pad, L.pad, L.pad)
 
-  if (size !== "small") {
+  if (family === "large") {
     const head = w.addStack()
     head.layoutHorizontally()
     head.centerAlignContent()
-    addText(head, "AI 사용량", Font.boldSystemFont(13), C.text)
+    head.size = new Size(inner, 0)
+    addText(head, "AI 사용량", Font.semiboldSystemFont(13), C.text)
     head.addSpacer()
-    addText(head, `${offline ? "오프라인 · " : ""}${fmtAgo(data.generated_at)}`, Font.systemFont(10), offline ? C.warn : C.sub)
-    w.addSpacer(6)
+    addText(head, offline ? "오프라인 · " + fmtAgo(data.generated_at) : `${fmtAgo(data.generated_at)} 업데이트`,
+      Font.systemFont(10), offline ? C.warn : C.sub)
+    w.addSpacer(12)
+  } else if (family === "medium") {
+    w.addSpacer()
   }
 
-  const shown = accounts.slice(0, capacity)
+  const shown = accounts.slice(0, L.accounts)
   shown.forEach((acc, i) => {
-    if (i > 0) w.addSpacer(size === "small" ? 6 : 7)
-    accountBlock(w, acc, size)
+    if (i > 0) w.addSpacer(L.gap)
+    // 중형은 머리줄이 없으므로 오프라인 표시를 첫 계정에 붙인다
+    const extra = family === "medium" && offline && i === 0 ? "오프라인" : null
+    accountBlock(w, acc, family, inner, extra)
   })
-  if (accounts.length > shown.length) {
-    w.addSpacer(4)
-    addText(w, `+${accounts.length - shown.length}개 더`, Font.systemFont(10), C.sub)
-  }
+
   w.addSpacer()
+  if (family === "small") {
+    const more = accounts.length > 1 ? `  ·  +${accounts.length - 1}개` : ""
+    addText(w, `${offline ? "오프라인 · " : ""}${fmtAgo(data.generated_at)} 업데이트${more}`, Font.systemFont(10), offline ? C.warn : C.sub)
+  } else if (family === "large" && accounts.length > shown.length) {
+    addText(w, `+${accounts.length - shown.length}개 더 · 위젯 Parameter 로 계정을 고를 수 있어요`, Font.systemFont(10), C.sub)
+  }
   return w
 }
 
@@ -546,7 +639,7 @@ function buildAccessoryWidget(result, family, param) {
     addText(w, "AI 사용량 –", Font.systemFont(12), Color.white())
     return w
   }
-  const parts = (acc) => primaryWindows(acc).map((x) => fmtPct(x.used_percent)).join("·")
+  const parts = (acc) => primaryWindows(acc).map((x) => fmtPct(x.used_percent)).join(" · ")
   const short = (acc) => (PROVIDER_STYLE[acc.provider] || {}).short || acc.label
   if (family === "accessoryInline") {
     addText(w, accounts.slice(0, 2).map((a) => `${(PROVIDER_STYLE[a.provider] || {}).abbr || short(a)} ${parts(a)}`).join("  "), Font.systemFont(12), Color.white())
@@ -559,15 +652,29 @@ function buildAccessoryWidget(result, family, param) {
     const s = w.addStack()
     s.layoutVertically()
     s.centerAlignContent()
-    addText(s, short(acc).slice(0, 6), Font.systemFont(9), Color.white())
-    addText(s, pw ? fmtPct(pw.used_percent) : "–", Font.boldSystemFont(15), Color.white())
+    const top = s.addStack()
+    top.addSpacer()
+    addLogo(top, acc.provider, 14, Color.white())
+    top.addSpacer()
+    const bottom = s.addStack()
+    bottom.addSpacer()
+    addText(bottom, pw ? fmtPct(pw.used_percent) : "–", Font.boldSystemFont(14), Color.white())
+    bottom.addSpacer()
     return w
   }
   // accessoryRectangular
-  for (const acc of accounts.slice(0, 3)) {
+  accounts.slice(0, 3).forEach((acc, i) => {
+    if (i > 0) w.addSpacer(2)
+    const row = w.addStack()
+    row.layoutHorizontally()
+    row.centerAlignContent()
+    addLogo(row, acc.provider, 11, Color.white())
+    row.addSpacer(5)
+    addText(row, acc.label || short(acc), Font.systemFont(12), Color.white(), { minScale: 0.7 })
+    row.addSpacer()
     const rc = acc.reset_credits && acc.reset_credits.available ? ` 🎟${acc.reset_credits.available}` : ""
-    addText(w, `${acc.label || short(acc)}  ${parts(acc)}${rc}`, Font.systemFont(12), Color.white(), { minScale: 0.7 })
-  }
+    addText(row, `${parts(acc)}${rc}`, Font.mediumSystemFont(12), Color.white(), { minScale: 0.7 })
+  })
   return w
 }
 
@@ -1026,6 +1133,13 @@ async function mainMenu() {
 
   await render(false)
   await table.present(false)
+}
+
+// ───────────────────────── 로고 (LobeHub Icons, MIT) ─────────────────────────
+const LOGOS = {
+  claude: "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",
+  codex: "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",
+  antigravity: "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",
 }
 
 // ───────────────────────── 진입점 ─────────────────────────
