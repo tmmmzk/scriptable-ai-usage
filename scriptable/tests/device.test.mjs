@@ -134,7 +134,7 @@ const api = new Function(...Object.keys(env), body + `
     devGetCreds, devCredKey, getConfig, setMode, KC_AG_CLIENT, msOf, devRefreshCreds, claudeProvider,
     checkAlerts, saveNotifySettings, planLabel, timeCandidates, claudeWindows, cleanUsage, money, shownPct, setShowLeft,
     setLang, t, fmtDuration, windowTitle, statusText, serverApi, STRINGS, LANG_CODES, primaryWindows, setWidgetGroup,
-    isNewer, checkUpdate, installUpdate, restoreBackup, backupVersion, VERSION }`)(...Object.values(env))
+    isNewer, checkUpdate, installUpdate, restoreBackup, backupVersion, VERSION, notifyUpdate }`)(...Object.values(env))
 
 let passed = 0
 const test = async (name, fn) => { await fn(); passed++; console.log("ok -", name) }
@@ -522,6 +522,29 @@ await test("업데이트: 새 버전 확인(12시간 캐시) → 설치·백업 
   assert.equal(api.restoreBackup(), "0.0.1")
   assert.equal(files["/scripts/AIUsage.js"], old)
   assert.equal(api.backupVersion(), null)
+})
+
+await test("업데이트 알림: 새 버전이면 한 번만, 앱에서 이미 봤으면 보내지 않음", async () => {
+  api.saveNotifySettings({ enabled: true, threshold: 90 })
+  files["/d/aiusage-update.json"] = JSON.stringify({ checked_at: Date.now(), latest: "99.0.0" })
+  notifications.length = 0
+  await api.notifyUpdate()
+  assert.deepEqual(notifications.map((n) => n.id), ["aiusage-update"])
+  await api.notifyUpdate()
+  assert.equal(notifications.length, 1) // 같은 버전은 한 번만
+  // 확인 결과를 새로 써도 '봤음' 기록은 남는다
+  up.script = { status: 200, body: 'const VERSION = "99.0.0"' }
+  await api.checkUpdate(true)
+  await api.notifyUpdate()
+  assert.equal(notifications.length, 1)
+  // 앱 배너로 이미 본 버전, 알림을 끈 경우
+  files["/d/aiusage-update.json"] = JSON.stringify({ checked_at: Date.now(), latest: "99.1.0", seen: "99.1.0" })
+  await api.notifyUpdate()
+  api.saveNotifySettings({ enabled: true, threshold: 90, types: { update: false } })
+  files["/d/aiusage-update.json"] = JSON.stringify({ checked_at: Date.now(), latest: "99.2.0" })
+  await api.notifyUpdate()
+  assert.equal(notifications.length, 1)
+  api.saveNotifySettings({ enabled: true, threshold: 90 })
 })
 
 // ── 3. 위젯이 기기 모드에서 그려지는지 (전체 스크립트 실행) ──

@@ -9,7 +9,7 @@
 // • 앱에서 실행하면 설정·계정 관리 화면이 열립니다.
 // • 위젯 Parameter 에 계정 이름(또는 id)을 쉼표로 적으면 그 계정만 표시합니다. 예) 개인,회사
 
-const VERSION = "0.6.0"
+const VERSION = "0.7.0"
 // 앱의 '업데이트'가 새 버전을 받아오는 주소(공개 저장소의 raw 파일). 포크했다면 여기를 바꾸세요.
 const UPDATE_URL = "https://raw.githubusercontent.com/tmmmzk/scriptable-ai-usage/main/scriptable/AIUsage.js"
 const KC_SERVER = "aiusage.server"
@@ -1799,13 +1799,14 @@ async function runWidget() {
   }
   widget.refreshAfterDate = new Date(Date.now() + 15 * 60 * 1000) // iOS 가 정하지만 15분 뒤를 요청
   Script.setWidget(widget)
+  if (getConfig()) await notifyUpdate()
 }
 
 // ───────────────────────── 알림 ─────────────────────────
 // 위젯·앱이 사용량을 받을 때마다 확인해, 필요한 알림을 한 번씩만 보낸다.
 // 보낸 기록(sent)과 한도별 직전 값(seen)은 파일에 둔다. seen 으로 예정보다 이른 초기화를 알아챈다.
 // 알림 종류. 이름·설명은 문구의 notify.<종류>.title / .desc
-const NOTIFY_TYPES = ["high", "reset", "early", "login", "credit"]
+const NOTIFY_TYPES = ["high", "reset", "early", "login", "credit", "update"]
 
 function notifySettings() {
   const base = { enabled: true, threshold: 90, types: Object.fromEntries(NOTIFY_TYPES.map((type) => [type, true])) }
@@ -1939,7 +1940,7 @@ async function checkUpdate(force = false) {
   const state = updateState()
   if (!force && Date.now() - (state.checked_at || 0) < 12 * 3600 * 1000) return state
   const { version } = await fetchLatestScript()
-  const next = { checked_at: Date.now(), latest: version }
+  const next = { ...state, checked_at: Date.now(), latest: version }
   writeJSON("aiusage-update.json", next)
   return next
 }
@@ -1969,8 +1970,23 @@ async function installUpdate() {
   const files = scriptFiles(path)
   fm.writeString(backupPath(), files.readString(path))
   files.writeString(path, source)
-  writeJSON("aiusage-update.json", { checked_at: Date.now(), latest: version })
+  writeJSON("aiusage-update.json", { ...updateState(), checked_at: Date.now(), latest: version })
   return version
+}
+
+// 새 버전을 사용자가 봤다고 기록한다(앱 배너를 봤거나 알림을 보냈으면 다시 알리지 않는다)
+const markUpdateSeen = (v) => writeJSON("aiusage-update.json", { ...updateState(), seen: v })
+
+// 위젯이 12시간마다 새 버전을 확인해 한 번 알린다. 실패해도 조용히 넘어간다.
+async function notifyUpdate() {
+  try {
+    const state = await checkUpdate()
+    if (!isNewer(state.latest, VERSION) || state.seen === state.latest) return
+    const settings = notifySettings()
+    if (settings.enabled && settings.types.update)
+      await sendNotification({ id: "aiusage-update", title: APP_TITLE, body: t("update.banner", { v: state.latest }) })
+    markUpdateSeen(state.latest)
+  } catch (e) {}
 }
 
 function restoreBackup() {
@@ -2018,18 +2034,31 @@ async function openPage(title, build) {
     ok(head, detail) {
       this.notice = { title: head, detail, color: C.ok }
     },
+    // 그리는 도중에 다시 그리라고 하면(예: 백그라운드 확인이 끝남) 줄이 섞이므로, 끝난 뒤 한 번 더 그린다
     async render() {
       if (this.closed) return
-      table.removeAllRows()
-      const head = typeof title === "function" ? title() : title
-      if (head) table.addRow(titleRow(head))
-      if (this.notice) table.addRow(noticeRow(this.notice))
-      try {
-        await build(this)
-      } catch (e) {
-        table.addRow(noticeRow({ title: t("common.loadFailed"), detail: e.message || String(e), color: C.bad }))
+      if (this.rendering) {
+        this.again = true
+        return
       }
-      table.reload()
+      this.rendering = true
+      try {
+        do {
+          this.again = false
+          table.removeAllRows()
+          const head = typeof title === "function" ? title() : title
+          if (head) table.addRow(titleRow(head))
+          if (this.notice) table.addRow(noticeRow(this.notice))
+          try {
+            await build(this)
+          } catch (e) {
+            table.addRow(noticeRow({ title: t("common.loadFailed"), detail: e.message || String(e), color: C.bad }))
+          }
+        } while (this.again && !this.closed)
+        table.reload()
+      } finally {
+        this.rendering = false
+      }
     },
     run(fn) {
       return async () => {
@@ -2149,6 +2178,23 @@ function providerRow(provider, title, subtitle, onSelect) {
   v.widthWeight = 8
   v.rightAligned()
   v.titleColor = Color.gray()
+  r.onSelect = onSelect
+  return r
+}
+
+// 눈에 띄어야 하는 안내 한 줄(초록 배경, 흰 글자)
+function bannerRow(text, onSelect) {
+  const r = new UITableRow()
+  r.dismissOnSelect = false
+  r.backgroundColor = C.ok
+  const c = r.addText(text)
+  c.titleColor = Color.white()
+  c.titleFont = Font.semiboldSystemFont(16)
+  c.widthWeight = 90
+  const v = r.addText("›")
+  v.widthWeight = 10
+  v.rightAligned()
+  v.titleColor = Color.white()
   r.onSelect = onSelect
   return r
 }
@@ -2399,12 +2445,11 @@ function resetCreditImage(item, index, provider) {
   fillRound(ctx, new Rect(0, 11, 36, 36), 10, new Color(brand, p.dark ? 0.28 : 0.14))
   drawTextAt(ctx, String(index + 1), 0, 19, 36, 20, Font.boldSystemFont(16), new Color(brand), "center")
   const right = drawPills(ctx, [creditLeft(item)], W, 19)
-  // 제목과 날짜
-  drawTextAt(ctx, item.title || t("credit.title"), 48, 10, right - 52, 20, Font.semiboldSystemFont(15), p.text)
-  const dates = [item.expires_at && t("credit.expires", { date: fmtDay(item.expires_at) }), item.granted_at && t("credit.granted", { date: fmtDay(item.granted_at) })]
-    .filter(Boolean)
-    .join("  ·  ")
-  drawTextAt(ctx, dates || item.description || "", 48, 32, right - 52, 16, Font.systemFont(12), p.sub)
+  // 이름이 따로 없으면(Claude) 만료일을 제목으로
+  const expires = item.expires_at ? t("credit.expires", { date: fmtDay(item.expires_at) }) : t("credit.noExpiry")
+  const sub = [item.title && expires, item.granted_at && t("credit.granted", { date: fmtDay(item.granted_at) })].filter(Boolean).join("  ·  ")
+  drawTextAt(ctx, item.title || expires, 48, sub ? 10 : 19, right - 52, 20, Font.semiboldSystemFont(15), p.text)
+  if (sub) drawTextAt(ctx, sub, 48, 32, right - 52, 16, Font.systemFont(12), p.sub)
   return ctx.getImage()
 }
 
@@ -2456,7 +2501,6 @@ async function antigravityPage() {
       const v = await prompt("Client Secret", t("ag.secretHelp"), { secure: true, value: cur.secret || "" })
       if (v != null) save({ secret: v })
     })))
-    if (agClient()) page.add(noticeRow({ title: t("ag.ready"), color: C.ok }))
   })
   return !!agClient()
 }
@@ -2548,7 +2592,6 @@ async function sessionKeyPage(accountId, { hasKey = false, canDelete = false } =
   await openPage("sessionKey", async (page) => {
     if (done) return
     page.add(noteRow(t("sk.help")))
-    page.add(headerRow(hasKey ? t("sk.replace") : t("sk.add")))
     pasteRows(page, { pasteTitle: t("sk.paste"), promptTitle: "sessionKey", promptHint: t("sk.prompt"), secure: true,
       emptyMessage: t("sk.clipEmpty"),
       submit: async (key) => {
@@ -2558,7 +2601,7 @@ async function sessionKeyPage(accountId, { hasKey = false, canDelete = false } =
       } })
     if (hasKey && canDelete) {
       page.add(actionRow(t("sk.delete"), page.run(async () => {
-        if (!(await confirm(t("sk.delete"), t("sk.deleteConfirm"), t("common.delete"), true))) return
+        if (!(await confirm(t("sk.delete"), null, t("common.delete"), true))) return
         await api("PATCH", `/v1/accounts/${accountId}`, { session_key: "" })
         done = true
         page.ok(t("common.didDelete"))
@@ -2583,7 +2626,8 @@ async function accountDetail(accountId) {
 
     const detail = usage.error || (usage.warnings || []).join(" / ") || null
     const color = usage.status === "ok" ? Color.gray() : usage.status === "partial" ? C.warn : C.bad
-    page.add(textRow(`${statusText(usage.status)}${usage.stale ? t("detail.stale") : ""}  ·  ${t("detail.checked", { ago: fmtAgo(usage.fetched_at) })}`,
+    const checked = t("detail.checked", { ago: fmtAgo(usage.fetched_at) })
+    page.add(textRow(usage.status === "ok" ? checked : `${statusText(usage.status)}${usage.stale ? t("detail.stale") : ""}  ·  ${checked}`,
       detail, { height: detail ? 64 : 44, color, font: Font.systemFont(14) }))
 
     if ((usage.windows || []).length) {
@@ -2620,7 +2664,7 @@ async function accountDetail(accountId) {
     page.add(headerRow(t("detail.manage")))
     page.add(actionRow(t("detail.refresh"), page.run(() => api("POST", `/v1/accounts/${accountId}/refresh`, undefined, 60)), ACCENT))
     page.add(valueRow(t("common.name"), acc.label, page.run(async () => {
-      const label = await prompt(t("common.name"), t("detail.namePrompt"), { value: acc.label })
+      const label = await prompt(t("common.name"), null, { value: acc.label })
       if (label) await patch({ label })
     }), { valueWidth: 55 }))
     page.add(toggleRow(t("detail.showInWidget"), acc.enabled, page.run(() => patch({ enabled: !acc.enabled })), t("detail.showInWidgetDesc")))
@@ -2629,7 +2673,8 @@ async function accountDetail(accountId) {
       const cur = widgetGroupOf({ ...usage, id: accountId })
       for (const g of groups) page.add(checkRow(t("detail.widgetGroup", { group: groupShort(g) }), g === cur, page.run(() => setWidgetGroup(accountId, g))))
     }
-    if (acc.provider === "claude") {
+    // sessionKey 는 OAuth 로 초기화권을 못 받을 때만 필요하다
+    if (acc.provider === "claude" && (acc.auth.session_key || !usage.reset_credits)) {
       page.add(valueRow("sessionKey", acc.auth.session_key ? t("common.saved") : t("common.none"), page.run(() =>
         sessionKeyPage(accountId, { hasKey: !!acc.auth.session_key, canDelete: !!acc.auth.oauth })
       ), { subtitle: t("sk.rowDesc") }))
@@ -2716,8 +2761,6 @@ async function updatePage() {
         installed = true
         page.ok(t("update.done", { v }), t("update.restart"))
       }), ACCENT))
-    } else if (state.latest && !checking) {
-      page.add(textRow(t("update.upToDate"), null, { color: Color.gray() }))
     }
     const prev = backupVersion()
     if (prev) {
@@ -2750,7 +2793,8 @@ async function notifyPage() {
     page.add(headerRow(t("notify.types")))
     for (const type of NOTIFY_TYPES) {
       const on = cur.types[type]
-      page.add(toggleRow(t(`notify.${type}.title`), on, page.run(() => save({ types: { ...cur.types, [type]: !on } })), t(`notify.${type}.desc`)))
+      const desc = STRINGS[`notify.${type}.desc`] ? t(`notify.${type}.desc`) : null // 이름만으로 알 수 있으면 설명 없음
+      page.add(toggleRow(t(`notify.${type}.title`), on, page.run(() => save({ types: { ...cur.types, [type]: !on } })), desc))
     }
 
     page.add(headerRow(t("notify.threshold")))
@@ -2761,7 +2805,6 @@ async function notifyPage() {
       await sendNotification({ id: "aiusage-test", title: APP_TITLE, body: t("notify.test.body") })
       page.ok(t("notify.sent"), t("notify.sentDetail"))
     }), ACCENT))
-    page.add(noteRow(t("notify.timingNote")))
   })
 }
 
@@ -2785,12 +2828,16 @@ async function mainMenu() {
     // 새 버전 확인은 화면을 늦추지 않게 따로 돌리고, 새 버전이 있으면 다시 그린다
     if (!checked) {
       checked = true
+      const before = updateState().latest
       checkUpdate()
-        .then((s) => isNewer(s.latest, VERSION) && page.render())
+        .then((s) => s.latest !== before && isNewer(s.latest, VERSION) && page.render())
         .catch(() => {})
     }
     const latest = updateState().latest
-    if (isNewer(latest, VERSION)) page.add(linkRow(t("update.banner", { v: latest }), page.run(updatePage)))
+    if (isNewer(latest, VERSION)) {
+      page.add(bannerRow(t("update.banner", { v: latest }), page.run(updatePage)))
+      markUpdateSeen(latest) // 봤으니 위젯이 따로 알리지 않는다
+    }
 
     if (!getConfig()) {
       page.add(noteRow(t("main.intro")))
@@ -2829,7 +2876,6 @@ async function mainMenu() {
     page.add(headerRow(t("main.actions")))
     page.add(linkRow(t("add.title"), page.run(addAccountPage)))
     page.add(actionRow(t("main.refreshAll"), page.run(() => (refresh = true)), ACCENT))
-    page.add(actionRow(t(showLeft() ? "show.toUsed" : "show.toLeft"), page.run(() => setShowLeft(!showLeft())), ACCENT))
     page.add(linkRow(t("settings.title"), page.run(settingsPage)))
   })
 }
@@ -2958,14 +3004,13 @@ const STRINGS = {
 
   // 알림
   "notify.high.title": ["사용량 경고", "Usage warning", "使用量の警告", "用量警告"],
-  "notify.high.desc": ["사용량이 경고 기준을 넘었을 때", "When usage passes the warning threshold", "使用量が警告のしきい値を超えたとき", "用量超过警告阈值时"],
   "notify.reset.title": ["초기화 알림", "Reset", "リセット", "重置提醒"],
   "notify.reset.desc": ["기준을 넘긴 한도가 초기화될 때", "When a limit that passed the threshold resets", "しきい値を超えた上限がリセットされたとき", "超过阈值的额度重置时"],
   "notify.early.title": ["조기 초기화 감지", "Early reset", "早期リセットの検知", "提前重置"],
   "notify.early.desc": ["예정보다 일찍 초기화됐을 때", "When a limit resets earlier than scheduled", "予定より早くリセットされたとき", "比预定时间更早重置时"],
   "notify.login.title": ["재로그인 필요", "Sign-in needed", "再ログインが必要", "需要重新登录"],
-  "notify.login.desc": ["로그인이 만료됐을 때", "When sign-in expires", "ログインの有効期限が切れたとき", "登录过期时"],
   "notify.credit.title": ["초기화권 만료 임박", "Reset credit expiring", "リセット券の期限が近い", "重置券即将过期"],
+  "notify.update.title": ["업데이트", "Updates", "アップデート", "更新"],
   "notify.credit.desc": ["초기화권이 하루 안에 만료될 때", "When a reset credit expires within a day", "リセット券が1日以内に期限切れになるとき", "重置券将在一天内过期时"],
   "notify.login.body": ["로그인이 만료됐어요. 다시 로그인해 주세요.", "Your sign-in expired. Please sign in again.", "ログインの有効期限が切れました。再ログインしてください。", "登录已过期，请重新登录。"],
   "notify.early.body": ["{name} 한도가 예정보다 일찍 초기화됐어요. ({from}% → {to}%)", "{name} reset earlier than scheduled. ({from}% → {to}%)",
@@ -2995,7 +3040,6 @@ const STRINGS = {
   "ag.idHelp": ["….apps.googleusercontent.com 으로 끝나는 값이에요.", "Ends with ….apps.googleusercontent.com.",
     "….apps.googleusercontent.com で終わる値です。", "以 ….apps.googleusercontent.com 结尾。"],
   "ag.secretHelp": ["GOCSPX- 로 시작하는 값이에요.", "Starts with GOCSPX-.", "GOCSPX- で始まる値です。", "以 GOCSPX- 开头。"],
-  "ag.ready": ["준비됐어요", "Ready", "準備できました", "已就绪"],
 
   // 계정 추가·로그인
   "add.title": ["계정 추가", "Add account", "アカウントを追加", "添加账号"],
@@ -3040,10 +3084,7 @@ const STRINGS = {
   "sk.prompt": ["sk-ant- 로 시작하는 값이에요.", "Starts with sk-ant-.", "sk-ant- で始まる値です。", "以 sk-ant- 开头。"],
   "sk.clipEmpty": ["클립보드가 비어 있어요. sessionKey를 다시 복사해 주세요.", "The clipboard is empty. Copy the sessionKey again.",
     "クリップボードが空です。sessionKey をもう一度コピーしてください。", "剪贴板为空。请重新复制 sessionKey。"],
-  "sk.replace": ["새 값으로 바꾸기", "Replace", "新しい値に置き換える", "替换为新值"],
-  "sk.add": ["추가하기", "Add", "追加する", "添加"],
   "sk.delete": ["sessionKey 삭제", "Delete sessionKey", "sessionKey を削除", "删除 sessionKey"],
-  "sk.deleteConfirm": ["초기화권이 더 이상 표시되지 않아요.", "Reset credits will no longer be shown.", "リセット券が表示されなくなります。", "将不再显示重置券。"],
   "sk.rowDesc": ["초기화권을 확인할 때 써요", "Used to check reset credits", "リセット券の確認に使います", "用于查看重置券"],
 
   // 계정 화면
@@ -3067,7 +3108,6 @@ const STRINGS = {
   "detail.balance": ["잔액 {n}", "Balance {n}", "残高 {n}", "余额 {n}"],
   "detail.manage": ["관리", "Manage", "管理", "管理"],
   "detail.refresh": ["지금 새로고침", "Refresh now", "今すぐ更新", "立即刷新"],
-  "detail.namePrompt": ["위젯에 보일 이름이에요.", "The name shown in the widget.", "ウィジェットに表示する名前です。", "在小组件中显示的名称。"],
   "detail.showInWidget": ["위젯에 표시", "Show in widget", "ウィジェットに表示", "在小组件中显示"],
   "detail.showInWidgetDesc": ["끄면 위젯과 알림에서만 빠져요", "Off hides it from widgets and notifications only", "オフにするとウィジェットと通知にだけ表示されません", "关闭后仅在小组件和通知中隐藏"],
   "detail.widgetGroup": ["위젯에 {group} 보이기", "Show {group} in widget", "ウィジェットに {group} を表示", "小组件显示 {group}"],
@@ -3077,7 +3117,6 @@ const STRINGS = {
     "{name} とログイン情報を{where}から削除しますか？", "要从{where}删除 {name} 及其登录信息吗？"],
   "detail.whereDevice": ["이 iPhone", "this iPhone", "この iPhone", "此 iPhone"],
   "detail.whereServer": ["서버", "the server", "サーバー", "服务器"],
-  "credit.title": ["사용량 초기화권", "Usage reset credit", "使用量リセット券", "用量重置券"],
   "credit.noExpiry": ["만료 없음", "No expiry", "期限なし", "无期限"],
   "credit.daysLeft": ["{n}일 남음", "{n}d left", "残り{n}日", "剩 {n} 天"],
   "credit.left": ["{t} 남음", "{t} left", "残り{t}", "剩 {t}"],
@@ -3092,8 +3131,6 @@ const STRINGS = {
   "show.used": ["사용한 양", "Used", "使用量", "已用"],
   "show.left": ["남은 양", "Remaining", "残り", "剩余"],
   "show.leftTag": ["남은 양", "remaining", "残り", "剩余"],
-  "show.toLeft": ["남은 양으로 보기", "Show remaining", "残りを表示", "显示剩余"],
-  "show.toUsed": ["사용한 양으로 보기", "Show used", "使用量を表示", "显示已用"],
   "settings.title": ["설정", "Settings", "設定", "设置"],
   "settings.connection": ["연결 방식", "Connection", "接続方法", "连接方式"],
   "settings.widgetNotify": ["위젯·알림", "Widget & notifications", "ウィジェット・通知", "小组件与通知"],
@@ -3118,7 +3155,6 @@ const STRINGS = {
   "update.done": ["업데이트했어요 ({v})", "Updated to {v}", "{v} にアップデートしました", "已更新到 {v}"],
   "update.restart": ["스크립트를 닫고 다시 실행하면 적용돼요.", "Close and run the script again to apply it.",
     "スクリプトを閉じてもう一度実行すると反映されます。", "关闭并重新运行脚本即可生效。"],
-  "update.upToDate": ["최신 버전이에요", "You're up to date", "最新バージョンです", "已是最新版本"],
   "update.restore": ["이전 버전으로 되돌리기 ({v})", "Restore previous version ({v})", "前のバージョンに戻す ({v})", "恢复上一版本（{v}）"],
   "update.restoreConfirm": ["업데이트하기 전 버전으로 되돌릴까요?", "Go back to the version from before the update?",
     "アップデート前のバージョンに戻しますか？", "要恢复到更新前的版本吗？"],
@@ -3144,7 +3180,6 @@ const STRINGS = {
   "notify.sentDetail": ["알림이 오지 않으면 iPhone 설정 → 앱 → Scriptable → 알림을 확인해 주세요.",
     "If nothing arrives, check iPhone Settings → Apps → Scriptable → Notifications.",
     "届かない場合は iPhone の設定 → アプリ → Scriptable → 通知 を確認してください。", "如果没有收到，请检查 iPhone 设置 → App → Scriptable → 通知。"],
-  "notify.timingNote": ["위젯이 새로 고쳐질 때(약 15분마다)와 앱을 열 때 확인해요.", "Checked when the widget refreshes (about every 15 minutes) and when you open the app.", "ウィジェットの更新時（約15分ごと）とアプリを開いたときに確認します。", "在小组件刷新时（约每 15 分钟）和打开应用时检查。"],
 
   // 위젯 미리보기
   "preview.small": ["소형", "Small", "小", "小"],
