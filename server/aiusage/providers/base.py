@@ -6,6 +6,7 @@ from typing import Any, Callable, Optional
 
 from ..config import Config
 from ..errors import LoginError
+from ..util import iso
 
 SaveCreds = Callable[[dict], None]
 
@@ -56,6 +57,31 @@ def make_window(
         "resets_at": resets_at,
         "window_seconds": window_seconds,
         "primary": primary,
+    }
+
+
+def reset_credit(expires: Optional[float], granted: Optional[float] = None, *, title: Any = None,
+                 description: Any = None, reset_type: Any = None) -> tuple[Optional[float], dict]:
+    """초기화권 한 장. (정렬용 만료 epoch, 응답용 dict). 사용(redeem)용 id 는 넣지 않는다."""
+    text = lambda v: v if isinstance(v, str) else None  # noqa: E731
+    return expires, {
+        "title": text(title),
+        "description": text(description),
+        "reset_type": text(reset_type),
+        "granted_at": iso(granted),
+        "expires_at": iso(expires),
+    }
+
+
+def reset_credits_summary(credits: list[tuple[Optional[float], dict]], available: Optional[int] = None) -> dict:
+    """초기화권 목록을 만료가 빠른 순(만료 없음은 마지막)으로 정리한 응답 형식."""
+    credits = sorted(credits, key=lambda c: (c[0] is None, c[0] or 0))
+    expirations = [exp for exp, _ in credits]
+    return {
+        "available": available if available is not None else len(credits),
+        "next_expires_at": iso(expirations[0]) if expirations and expirations[0] else None,
+        "expirations": [iso(e) for e in expirations],
+        "items": [item for _, item in credits],
     }
 
 

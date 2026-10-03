@@ -150,7 +150,8 @@ class AntigravityProvider(Provider):
         http.raise_for_common(resp, f"Antigravity {method}")
         return resp.json()
 
-    def _project_id(self, token: str, creds: dict, save_creds: SaveCreds) -> tuple[Optional[str], dict]:
+    def _code_assist(self, token: str, creds: dict, save_creds: SaveCreds) -> tuple[Optional[str], Optional[str], dict]:
+        """프로젝트 ID 와 플랜을 알아낸다. 프로젝트가 없으면 온보딩을 시도한다. (project, plan, creds)"""
         info = self._post("loadCodeAssist", token, {"metadata": CLIENT_METADATA})
         project = creds.get("project_id") or project_ref(info.get("cloudaicompanionProject"))
         if not project:
@@ -170,8 +171,7 @@ class AntigravityProvider(Provider):
         if project and creds.get("project_id") != project:
             creds = dict(creds, project_id=project)
             save_creds(creds)
-        creds = dict(creds, _plan=resolve_plan(info, creds))
-        return project, creds
+        return project, resolve_plan(info, creds), creds
 
     # ---------- 조회 ----------
     def fetch(self, cfg: Config, account: dict, save_creds: SaveCreds) -> Usage:
@@ -180,14 +180,14 @@ class AntigravityProvider(Provider):
             creds = self._refresh(cfg, creds, save_creds)
         token = creds["access_token"]
         try:
-            project, creds = self._project_id(token, creds, save_creds)
+            project, plan, creds = self._code_assist(token, creds, save_creds)
         except AuthError:
             creds = self._refresh(cfg, creds, save_creds)
             token = creds["access_token"]
-            project, creds = self._project_id(token, creds, save_creds)
+            project, plan, creds = self._code_assist(token, creds, save_creds)
 
         body = {"project": project} if project else {}
-        usage = Usage(plan=creds.get("_plan"), email=jwt_claims(creds.get("id_token")).get("email"))
+        usage = Usage(plan=plan, email=jwt_claims(creds.get("id_token")).get("email"))
         try:
             usage.windows = parse_quota_summary(self._post("retrieveUserQuotaSummary", token, body))
         except ProviderError as exc:

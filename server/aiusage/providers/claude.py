@@ -15,7 +15,18 @@ from .. import http
 from ..config import Config
 from ..errors import AuthError, BlockedError, LoginError, ProviderError
 from ..util import clamp_pct, iso, now, parse_iso, pkce_pair, to_float
-from .base import LoginResult, LoginStart, Provider, SaveCreds, Usage, check_state, make_window, parse_callback_input
+from .base import (
+    LoginResult,
+    LoginStart,
+    Provider,
+    SaveCreds,
+    Usage,
+    check_state,
+    make_window,
+    parse_callback_input,
+    reset_credit,
+    reset_credits_summary,
+)
 
 CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 AUTHORIZE_URL = "https://claude.com/cai/oauth/authorize"
@@ -319,7 +330,7 @@ def parse_reset_credits(block: Any, at: float) -> Optional[dict]:
     """
     if not isinstance(block, dict) or block.get("eligible") is not True:
         return None
-    items: list[tuple[Optional[float], dict]] = []
+    credits = []
     for grant in block.get("grants") or []:
         if not isinstance(grant, dict):
             continue
@@ -332,22 +343,7 @@ def parse_reset_credits(block: Any, at: float) -> Optional[dict]:
             continue
         if ends is not None and ends <= at:
             continue
-        if len(items) + left > MAX_RESET_CREDITS:
+        if len(credits) + left > MAX_RESET_CREDITS:
             return None
-        # grant id 는 사용(redeem)용 핸들이라 내보내지 않는다. resets_left 만큼 한 장씩 펼친다.
-        for _ in range(left):
-            items.append((ends, {
-                "title": None,
-                "description": None,
-                "reset_type": None,
-                "granted_at": iso(starts),
-                "expires_at": iso(ends),
-            }))
-    items.sort(key=lambda i: (i[0] is None, i[0] or 0))
-    expirations = [e for e, _ in items]
-    return {
-        "available": len(expirations),
-        "next_expires_at": iso(expirations[0]) if expirations and expirations[0] else None,
-        "expirations": [iso(e) for e in expirations],
-        "items": [item for _, item in items],
-    }
+        credits.extend(reset_credit(ends, starts) for _ in range(left))
+    return reset_credits_summary(credits)

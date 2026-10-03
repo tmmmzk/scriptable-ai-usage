@@ -29,42 +29,40 @@ class UsageService:
         self._stop = threading.Event()
 
     # ---------- 공개 표현 ----------
-    def public_account(self, acc: dict) -> dict:
+    def _common(self, acc: dict, snap: dict) -> dict:
+        """계정 목록과 사용량 응답에 공통으로 들어가는 필드."""
         provider = providers.get(acc["provider"])
-        snap = self.store.get_snapshot(acc["id"]) or {}
         return {
             "id": acc["id"],
             "provider": acc["provider"],
             "provider_name": provider.name if provider else acc["provider"],
             "label": acc.get("label"),
             "email": acc.get("email"),
-            "plan": acc.get("plan"),
-            "enabled": acc.get("enabled", True),
-            "order": acc.get("order", 0),
-            "created_at": acc.get("created_at"),
-            "auth": provider.describe_creds(acc.get("creds") or {}) if provider else {},
             "status": snap.get("status", "pending"),
             "error": snap.get("error"),
             "fetched_at": snap.get("fetched_at"),
             "last_success_at": snap.get("last_success_at"),
         }
 
+    def public_account(self, acc: dict) -> dict:
+        provider = providers.get(acc["provider"])
+        snap = self.store.get_snapshot(acc["id"]) or {}
+        return {
+            **self._common(acc, snap),
+            "plan": acc.get("plan"),
+            "enabled": acc.get("enabled", True),
+            "order": acc.get("order", 0),
+            "created_at": acc.get("created_at"),
+            "auth": provider.describe_creds(acc.get("creds") or {}) if provider else {},
+        }
+
     def usage_entry(self, acc: dict) -> dict:
         snap = self.store.get_snapshot(acc["id"]) or {}
-        provider = providers.get(acc["provider"])
         return {
-            "id": acc["id"],
-            "provider": acc["provider"],
-            "provider_name": provider.name if provider else acc["provider"],
-            "label": acc.get("label"),
-            "email": acc.get("email"),
+            **self._common(acc, snap),
             "plan": snap.get("plan") or acc.get("plan"),
-            "status": snap.get("status", "pending"),
-            "error": snap.get("error"),
             "warnings": snap.get("warnings", []),
             "stale": snap.get("stale", False),
-            "fetched_at": snap.get("fetched_at"),
-            "last_success_at": snap.get("last_success_at"),
             "windows": snap.get("windows", []),
             "reset_credits": snap.get("reset_credits"),
             "extra": snap.get("extra", {}),

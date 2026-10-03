@@ -16,7 +16,18 @@ from .. import http
 from ..config import Config
 from ..errors import AuthError, LoginError, ProviderError
 from ..util import clamp_pct, iso, jwt_claims, now, parse_iso, pkce_pair, to_float, window_label
-from .base import LoginResult, LoginStart, Provider, SaveCreds, Usage, check_state, make_window, parse_callback_input
+from .base import (
+    LoginResult,
+    LoginStart,
+    Provider,
+    SaveCreds,
+    Usage,
+    check_state,
+    make_window,
+    parse_callback_input,
+    reset_credit,
+    reset_credits_summary,
+)
 
 ISSUER = "https://auth.openai.com"
 CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
@@ -242,29 +253,14 @@ def parse_extra(data: dict) -> dict:
 def parse_reset_credits(data: Any, at: float) -> Optional[dict]:
     if not isinstance(data, dict):
         return None
-    items: list[dict] = []
+    credits = []
     for credit in data.get("credits") or []:
         if not isinstance(credit, dict) or credit.get("status") != "available":
             continue
         exp = parse_iso(credit.get("expires_at"))
         if exp is not None and exp <= at:
             continue
-        # id 는 사용(redeem)용 핸들이라 내보내지 않는다
-        items.append({
-            "title": credit.get("title") if isinstance(credit.get("title"), str) else None,
-            "description": credit.get("description") if isinstance(credit.get("description"), str) else None,
-            "reset_type": credit.get("reset_type") if isinstance(credit.get("reset_type"), str) else None,
-            "granted_at": iso(parse_iso(credit.get("granted_at"))),
-            "expires_at": iso(exp),
-            "_exp": exp,
-        })
-    items.sort(key=lambda i: (i["_exp"] is None, i["_exp"] or 0))
-    expirations = [i.pop("_exp") for i in items]
+        credits.append(reset_credit(exp, parse_iso(credit.get("granted_at")), title=credit.get("title"),
+                                    description=credit.get("description"), reset_type=credit.get("reset_type")))
     count = data.get("available_count")
-    available = count if isinstance(count, int) and count >= 0 else len(expirations)
-    return {
-        "available": available,
-        "next_expires_at": iso(expirations[0]) if expirations and expirations[0] else None,
-        "expirations": [iso(e) for e in expirations],
-        "items": items,
-    }
+    return reset_credits_summary(credits, count if isinstance(count, int) and count >= 0 else None)

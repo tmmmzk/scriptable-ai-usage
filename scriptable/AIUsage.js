@@ -9,16 +9,20 @@
 // • 위젯 Parameter 에 계정 이름(또는 id)을 쉼표로 적으면 그 계정만 표시합니다. 예) 개인,회사
 // • 서버 없이 디자인만 보려면 앱에서 '데모 모드'를 켜거나, 위젯 Parameter 에 demo 를 적으세요.
 
-const VERSION = "0.1.0"
+const VERSION = "0.2.0"
 const KC_SERVER = "aiusage.server"
 const KC_KEY = "aiusage.apikey"
 const CACHE_FILE = "aiusage-cache.json"
 const WIDGET_REFRESH_MIN = 15
 
 const PROVIDER_STYLE = {
-  claude: { color: "#D97757", short: "Claude", abbr: "CL" },
-  codex: { color: "#10A37F", short: "Codex", abbr: "CX" },
-  antigravity: { color: "#4285F4", short: "Antigravity", abbr: "AG" },
+  claude: { color: "#D97757", name: "Claude", abbr: "CL" },
+  codex: { color: "#10A37F", name: "Codex", abbr: "CX" },
+  antigravity: { color: "#4285F4", name: "Antigravity", abbr: "AG" },
+}
+
+function providerName(provider) {
+  return (PROVIDER_STYLE[provider] || {}).name || provider
 }
 
 const C = {
@@ -119,13 +123,11 @@ function demoReset() {
   if (fm.fileExists(p)) fm.remove(p)
 }
 
-const PROVIDER_NAMES = { claude: "Claude", codex: "Codex", antigravity: "Antigravity" }
-
 function demoUsage(a, updated) {
   const at = (sec) => (sec == null ? null : new Date(updated + sec * 1000).toISOString())
   const ts = new Date(updated).toISOString()
   return {
-    id: a.id, provider: a.provider, provider_name: PROVIDER_NAMES[a.provider], label: a.label, email: a.email,
+    id: a.id, provider: a.provider, provider_name: providerName(a.provider), label: a.label, email: a.email,
     plan: a.plan, status: a.status, error: a.error || null, warnings: a.warnings || [], stale: !!a.stale,
     fetched_at: ts, last_success_at: a.stale ? new Date(updated - 2 * D * 1000).toISOString() : ts,
     windows: a.windows.map((w) => ({ ...w, resets_at: at(w.reset_in) })),
@@ -155,7 +157,7 @@ function demoAccount(a, updated) {
 function demoNewAccount(provider, label) {
   const n = Math.floor(Math.random() * 1000)
   const rnd = () => Math.round(Math.random() * 90)
-  const base = { id: `${provider}_demo${n}`, provider, label: label || `${PROVIDER_NAMES[provider]} ${n}`,
+  const base = { id: `${provider}_demo${n}`, provider, label: label || `${providerName(provider)} ${n}`,
     email: `demo${n}@example.com`, plan: null, enabled: true, status: "ok", extra: {} }
   if (provider === "antigravity") {
     return { ...base, auth: { oauth: true, reset_credits_supported: false }, reset_credits: null,
@@ -326,12 +328,10 @@ function fmtPct(p) {
   return p == null ? "–" : `${Math.round(p)}%`
 }
 
-function fmtUntil(iso, compact = false) {
-  if (!iso) return ""
-  const ms = new Date(iso).getTime() - Date.now()
-  if (isNaN(ms)) return ""
-  if (ms <= 0) return compact ? "곧" : "곧 초기화"
-  // 단위는 항상 한글, 큰 단위 두 개까지만 (예: 3일 10시간, 2시간 12분, 46분)
+// 남은 기간. 단위는 한글, 큰 단위 두 개까지 (예: 3일 10시간, 2시간 12분, 46분). 지났거나 없으면 null.
+function fmtDuration(iso) {
+  const ms = iso ? new Date(iso).getTime() - Date.now() : NaN
+  if (!(ms > 0)) return null
   const m = Math.max(1, Math.floor(ms / 60000))
   const d = Math.floor(m / 1440)
   const h = Math.floor((m % 1440) / 60)
@@ -339,6 +339,13 @@ function fmtUntil(iso, compact = false) {
   if (d > 0) return h ? `${d}일 ${h}시간` : `${d}일`
   if (h > 0) return mm ? `${h}시간 ${mm}분` : `${h}시간`
   return `${mm}분`
+}
+
+// "2시간 12분 후 초기화" · 이미 지났으면 "곧 초기화" · 정보가 없으면 ""
+function resetText(iso) {
+  if (!iso) return ""
+  const left = fmtDuration(iso)
+  return left ? `${left} 후 초기화` : "곧 초기화"
 }
 
 function fmtAgo(iso) {
@@ -351,16 +358,21 @@ function fmtAgo(iso) {
 }
 
 function fmtDate(iso) {
-  if (!iso) return "만료 없음"
+  if (!iso) return ""
   const df = new DateFormatter()
   df.locale = "ko_KR"
   df.dateFormat = "M월 d일 HH:mm"
   return df.string(new Date(iso))
 }
 
+function fmtDay(iso) {
+  const d = new Date(iso)
+  return `${d.getMonth() + 1}월 ${d.getDate()}일`
+}
+
 // "Claude (me@example.com)"
 function providerLine(acc) {
-  const name = PROVIDER_NAMES[acc.provider] || acc.provider_name || acc.provider
+  const name = providerName(acc.provider)
   return acc.email ? `${name} (${acc.email})` : name
 }
 
@@ -397,6 +409,25 @@ function primaryWindows(acc, n = 2) {
   return (prim.length ? prim : ws).slice(0, n)
 }
 
+// 계정 이름 줄 오른쪽 배지. enabled: false 면 "숨김"(앱), offline 이면 "오프라인"(위젯).
+// color 가 없으면 기본 글자색, muted 면 흐린 글자색(위젯/앱이 각자 맞는 색을 고른다).
+function statusPills(acc, { enabled, offline } = {}) {
+  const pills = []
+  const rc = acc.reset_credits
+  if (rc && rc.available > 0) pills.push({ text: `초기화권 ${rc.available}` })
+  if (acc.status === "needs_login") pills.push({ text: "재로그인", color: C.bad })
+  else if (acc.status === "partial") pills.push({ text: "일부 실패", color: C.warn })
+  else if (acc.status && !["ok", "pending"].includes(acc.status)) pills.push({ text: STATUS_TEXT[acc.status] || "오류", color: C.bad })
+  if (enabled === false) pills.push({ text: "숨김", muted: true })
+  if (offline) pills.push({ text: "오프라인", color: C.warn })
+  return pills
+}
+
+// 사용률 숫자 색: 70% 미만은 기본 글자색, 이상이면 경고색
+function pctTextColor(pct, dim, base) {
+  return dim || pct == null || pct < 70 ? base : pctColor(pct)
+}
+
 const STATUS_TEXT = {
   ok: "정상",
   partial: "일부 실패",
@@ -405,6 +436,30 @@ const STATUS_TEXT = {
   blocked: "차단됨",
   rate_limited: "요청 한도 초과",
   pending: "대기 중",
+}
+
+// ───────────────────────── 공용 그리기 (DrawContext) ─────────────────────────
+function newCtx(w, h) {
+  const ctx = new DrawContext()
+  ctx.size = new Size(w, h)
+  ctx.opaque = false
+  ctx.respectScreenScale = true
+  return ctx
+}
+
+function fillRound(ctx, rect, r, color) {
+  const p = new Path()
+  p.addRoundedRect(rect, r, r)
+  ctx.addPath(p)
+  ctx.setFillColor(color)
+  ctx.fillPath()
+}
+
+// 둥근 진행 막대. 0% 초과면 최소한 높이만큼은 채워 보이게 한다.
+function drawBar(ctx, x, y, width, height, pct, color, track) {
+  const r = height / 2
+  fillRound(ctx, new Rect(x, y, width, height), r, track)
+  if (pct != null && pct > 0) fillRound(ctx, new Rect(x, y, Math.max(height, (width * Math.min(100, pct)) / 100), height), r, color)
 }
 
 // ───────────────────────── 위젯 그리기 ─────────────────────────
@@ -420,12 +475,10 @@ const WIDGET_SIZES = {
   375: { small: 155, medium: 329, large: 345 },
 }
 
-function widgetSize(family) {
+function widgetWidth(family) {
   const w = Math.round(Math.min(Device.screenSize().width, Device.screenSize().height))
-  const s = WIDGET_SIZES[w] || { small: Math.round(w * 0.4), medium: Math.round(w * 0.86), large: Math.round(w * 0.9) }
-  if (family === "small") return { w: s.small, h: s.small }
-  if (family === "large" || family === "extraLarge") return { w: s.medium, h: s.large }
-  return { w: s.medium, h: s.small }
+  const s = WIDGET_SIZES[w] || { small: Math.round(w * 0.4), medium: Math.round(w * 0.86) }
+  return family === "small" ? s.small : s.medium
 }
 
 const LAYOUT = {
@@ -454,8 +507,8 @@ function logoKey(provider, darkBg = false) {
 }
 
 let logoCache = {}
-function logoImage(provider) {
-  const key = logoKey(provider)
+function logoImage(provider, darkBg = false) {
+  const key = logoKey(provider, darkBg)
   if (!LOGOS[key]) return null
   if (!logoCache[key]) logoCache[key] = Image.fromData(Data.fromBase64String(LOGOS[key]))
   return logoCache[key]
@@ -471,24 +524,8 @@ function addLogo(stack, provider, size, tint) {
 }
 
 function barImage(pct, width, height, color) {
-  const ctx = new DrawContext()
-  ctx.size = new Size(width, height)
-  ctx.opaque = false
-  ctx.respectScreenScale = true
-  const r = height / 2
-  const track = new Path()
-  track.addRoundedRect(new Rect(0, 0, width, height), r, r)
-  ctx.addPath(track)
-  ctx.setFillColor(C.track)
-  ctx.fillPath()
-  if (pct != null && pct > 0) {
-    const w = Math.max(height, (width * Math.min(100, pct)) / 100)
-    const fill = new Path()
-    fill.addRoundedRect(new Rect(0, 0, w, height), r, r)
-    ctx.addPath(fill)
-    ctx.setFillColor(color)
-    ctx.fillPath()
-  }
+  const ctx = newCtx(width, height)
+  drawBar(ctx, 0, 0, width, height, pct, color, C.track)
   return ctx.getImage()
 }
 
@@ -516,33 +553,20 @@ function accountHeader(stack, acc, opts) {
   row.layoutHorizontally()
   row.centerAlignContent()
   row.size = new Size(opts.width, 20)
-  const style = PROVIDER_STYLE[acc.provider] || { short: acc.provider }
   addLogo(row, acc.provider, opts.logo)
   row.addSpacer(6)
-  addText(row, acc.label || style.short, Font.semiboldSystemFont(15), C.text, {
+  addText(row, acc.label || providerName(acc.provider), Font.semiboldSystemFont(15), C.text, {
     opacity: opts.dim ? 0.55 : 1,
   })
   if (opts.showProvider) {
     row.addSpacer(6)
-    addText(row, style.short, Font.systemFont(12), C.sub)
+    addText(row, providerName(acc.provider), Font.systemFont(12), C.sub)
   }
   row.addSpacer()
-  const rc = acc.reset_credits
-  if (rc && rc.available > 0) addPill(row, `초기화권 ${rc.available}`)
-  if (acc.status === "needs_login") {
-    row.addSpacer(4)
-    addPill(row, "재로그인", C.bad)
-  } else if (acc.status === "partial") {
-    row.addSpacer(4)
-    addPill(row, "일부 실패", C.warn)
-  } else if (acc.status !== "ok" && acc.status !== "pending") {
-    row.addSpacer(4)
-    addPill(row, STATUS_TEXT[acc.status] || "오류", C.bad)
-  }
-  if (opts.extraPill) {
-    row.addSpacer(4)
-    addPill(row, opts.extraPill, C.warn)
-  }
+  statusPills(acc, { offline: opts.offline }).forEach((pill, i) => {
+    if (i > 0) row.addSpacer(4)
+    addPill(row, pill.text, pill.muted ? C.sub : pill.color)
+  })
   return row
 }
 
@@ -558,20 +582,18 @@ function windowCell(parent, w, width, dim) {
   // minimumScaleFactor 를 쓰면 줄마다 글자 크기가 달라지므로 쓰지 않는다
   addText(top, windowTitle(w, true), Font.systemFont(12), C.sub)
   top.addSpacer()
-  const pctColorFor = dim || w.used_percent == null || w.used_percent < 70 ? C.text : pctColor(w.used_percent)
-  addText(top, fmtPct(w.used_percent), Font.semiboldSystemFont(13), pctColorFor, { opacity: dim ? 0.55 : 1 })
+  addText(top, fmtPct(w.used_percent), Font.semiboldSystemFont(13), pctTextColor(w.used_percent, dim, C.text), { opacity: dim ? 0.55 : 1 })
 
   cell.addSpacer(3)
   const bar = cell.addImage(barImage(w.used_percent, width, 6, dim ? C.sub : pctColor(w.used_percent)))
   bar.imageSize = new Size(width, 6)
-  // 남은 시간은 막대 아래 작은 글씨로
-  const until = fmtUntil(w.resets_at)
+  // 남은 시간은 막대 아래 작은 글씨로 (정보가 없어도 줄 높이는 유지)
   cell.addSpacer(2)
-  addText(cell, until ? `${until} 후 초기화` : " ", Font.systemFont(10), C.sub, { opacity: 0.85 })
+  addText(cell, resetText(w.resets_at) || " ", Font.systemFont(10), C.sub, { opacity: 0.85 })
   return cell
 }
 
-function accountBlock(parent, acc, family, inner, extraPill) {
+function accountBlock(parent, acc, family, inner, offline) {
   const dim = acc.stale || acc.status === "needs_login"
   const block = parent.addStack()
   block.layoutVertically()
@@ -580,7 +602,7 @@ function accountBlock(parent, acc, family, inner, extraPill) {
     logo: family === "small" ? 16 : 18,
     showProvider: family !== "small",
     dim,
-    extraPill,
+    offline,
   })
   const ws = primaryWindows(acc)
   if (!ws.length) {
@@ -634,7 +656,7 @@ function buildHomeWidget(result, size, param) {
 
   const family = size === "extraLarge" ? "large" : LAYOUT[size] ? size : "medium"
   const L = LAYOUT[family]
-  const inner = widgetSize(family).w - L.pad * 2
+  const inner = widgetWidth(family) - L.pad * 2
 
   const w = new ListWidget()
   w.backgroundColor = C.bg
@@ -658,8 +680,7 @@ function buildHomeWidget(result, size, param) {
   shown.forEach((acc, i) => {
     if (i > 0) w.addSpacer(L.gap)
     // 중형은 머리줄이 없으므로 오프라인 표시를 첫 계정에 붙인다
-    const extra = family === "medium" && offline && i === 0 ? "오프라인" : null
-    accountBlock(w, acc, family, inner, extra)
+    accountBlock(w, acc, family, inner, family === "medium" && offline && i === 0)
   })
 
   w.addSpacer()
@@ -680,7 +701,7 @@ function buildAccessoryWidget(result, family, param) {
     return w
   }
   const parts = (acc) => primaryWindows(acc).map((x) => fmtPct(x.used_percent)).join(" · ")
-  const short = (acc) => (PROVIDER_STYLE[acc.provider] || {}).short || acc.label
+  const short = (acc) => providerName(acc.provider)
   if (family === "accessoryInline") {
     addText(w, accounts.slice(0, 2).map((a) => `${(PROVIDER_STYLE[a.provider] || {}).abbr || short(a)} ${parts(a)}`).join("  "), Font.systemFont(12), Color.white())
     return w
@@ -954,24 +975,8 @@ function measureItemsFor(acc, usage, nameSize, nameWeight) {
   const items = [{ text: acc.label, size: nameSize, weight: nameWeight }]
   const plan = planLabel((usage && usage.plan) || acc.plan)
   if (plan) items.push({ text: plan, size: 10, weight: 700 })
-  for (const pill of accountPills(usage || acc, acc.enabled)) items.push({ text: pill.text, size: 11, weight: 600 })
+  for (const pill of statusPills(usage || acc, { enabled: acc.enabled })) items.push({ text: pill.text, size: 11, weight: 600 })
   return items
-}
-
-function newCtx(w, h) {
-  const ctx = new DrawContext()
-  ctx.size = new Size(w, h)
-  ctx.opaque = false
-  ctx.respectScreenScale = true
-  return ctx
-}
-
-function fillRound(ctx, rect, r, color) {
-  const p = new Path()
-  p.addRoundedRect(rect, r, r)
-  ctx.addPath(p)
-  ctx.setFillColor(color)
-  ctx.fillPath()
 }
 
 function drawTextAt(ctx, text, x, y, w, h, font, color, align = "left") {
@@ -984,19 +989,18 @@ function drawTextAt(ctx, text, x, y, w, h, font, color, align = "left") {
 }
 
 function drawLogo(ctx, provider, x, y, size, pal) {
-  const key = logoKey(provider, pal.dark)
-  if (!LOGOS[key]) return
-  ctx.drawImageInRect(Image.fromData(Data.fromBase64String(LOGOS[key])), new Rect(x, y, size, size))
+  const img = logoImage(provider, pal.dark)
+  if (img) ctx.drawImageInRect(img, new Rect(x, y, size, size))
 }
 
-// 오른쪽부터 배지를 그리고, 남은 오른쪽 경계를 돌려준다.
+// pills(왼쪽→오른쪽 순서)를 right 에 붙여 그리고, 남은 오른쪽 경계를 돌려준다.
 function drawPills(ctx, pills, right, y, pal) {
   let x = right
-  for (const p of pills) {
+  for (const p of [...pills].reverse()) {
     const w = textW(p.text, 11, 600) + 14
     x -= w
     fillRound(ctx, new Rect(x, y, w, 20), 10, pal.pill)
-    drawTextAt(ctx, p.text, x, y + 3, w, 16, Font.semiboldSystemFont(11), p.color || pal.text, "center")
+    drawTextAt(ctx, p.text, x, y + 3, w, 16, Font.semiboldSystemFont(11), p.muted ? pal.sub : p.color || pal.text, "center")
     x -= 6
   }
   return x
@@ -1017,17 +1021,6 @@ function drawPlanBadge(ctx, provider, plan, name, maxRight) {
   drawTextAt(ctx, label, x, top + 2.5, w, h - 2, Font.boldSystemFont(10), new Color(brand), "center")
 }
 
-function accountPills(acc, enabled) {
-  const pills = []
-  const rc = acc.reset_credits
-  if (rc && rc.available > 0) pills.push({ text: `초기화권 ${rc.available}` })
-  if (acc.status === "needs_login") pills.push({ text: "재로그인", color: C.bad })
-  else if (acc.status === "partial") pills.push({ text: "일부 실패", color: C.warn })
-  else if (acc.status && !["ok", "pending"].includes(acc.status)) pills.push({ text: STATUS_TEXT[acc.status] || "오류", color: C.bad })
-  if (enabled === false) pills.push({ text: "숨김", color: pal().sub })
-  return pills.reverse() // 오른쪽부터 그리므로 뒤집는다
-}
-
 let _pal = null
 function pal() {
   return _pal || (_pal = appPalette())
@@ -1036,15 +1029,11 @@ function pal() {
 function drawBarCell(ctx, w, x, y, width, dim, p) {
   const pct = w.used_percent
   const color = dim || pct == null ? p.sub : pctColor(pct)
-  const pctText = pct == null ? "–" : `${Math.round(pct)}%`
   drawTextAt(ctx, windowTitle(w, true), x, y + 2, width - 56, 17, Font.systemFont(13), p.sub)
-  drawTextAt(ctx, pctText, x + width - 60, y, 60, 20, Font.semiboldSystemFont(15),
-    dim || pct == null || pct < 70 ? p.text : pctColor(pct), "right")
-  fillRound(ctx, new Rect(x, y + 23, width, 7), 3.5, p.track)
-  if (pct != null && pct > 0) fillRound(ctx, new Rect(x, y + 23, Math.max(7, (width * Math.min(100, pct)) / 100), 7), 3.5, color)
+  drawTextAt(ctx, fmtPct(pct), x + width - 60, y, 60, 20, Font.semiboldSystemFont(15), pctTextColor(pct, dim, p.text), "right")
+  drawBar(ctx, x, y + 23, width, 7, pct, color, p.track)
   // 남은 시간은 막대 아래 작은 글씨로
-  const until = fmtUntil(w.resets_at)
-  if (until) drawTextAt(ctx, `${until} 후 초기화`, x, y + 33, width, 14, Font.systemFont(11), new Color(p.sub.hex, 0.85))
+  drawTextAt(ctx, resetText(w.resets_at), x, y + 33, width, 14, Font.systemFont(11), new Color(p.sub.hex, 0.85))
 }
 
 // 메인 화면의 계정 카드
@@ -1055,7 +1044,7 @@ function accountCardImage(acc, enabled) {
   const ctx = newCtx(W, H)
   const dim = acc.stale || acc.status === "needs_login"
   drawLogo(ctx, acc.provider, 0, 6, 24, p)
-  const right = drawPills(ctx, accountPills(acc, enabled), W, 10, p)
+  const right = drawPills(ctx, statusPills(acc, { enabled }), W, 10, p)
   drawTextAt(ctx, acc.label, 34, 2, right - 40, 22, Font.semiboldSystemFont(17), dim ? p.sub : p.text)
   drawPlanBadge(ctx, acc.provider, acc.plan, { text: acc.label, x: 34, y: 2, size: 17, weight: 600 }, right - 6)
   drawTextAt(ctx, providerLine(acc), 34, 23, right - 40, 16, Font.systemFont(12), p.sub)
@@ -1077,11 +1066,9 @@ function windowRowImage(w, dim) {
   const ctx = newCtx(W, 58)
   const pct = w.used_percent
   drawTextAt(ctx, windowTitle(w), 0, 4, W - 80, 20, Font.mediumSystemFont(15), p.text)
-  drawTextAt(ctx, pct == null ? "–" : `${Math.round(pct)}%`, W - 80, 2, 80, 22, Font.semiboldSystemFont(18),
-    dim || pct == null || pct < 70 ? p.text : pctColor(pct), "right")
-  fillRound(ctx, new Rect(0, 30, W, 8), 4, p.track)
-  if (pct != null && pct > 0) fillRound(ctx, new Rect(0, 30, Math.max(8, (W * Math.min(100, pct)) / 100), 8), 4, dim ? p.sub : pctColor(pct))
-  const reset = w.resets_at ? `${fmtUntil(w.resets_at)} 후 초기화 (${fmtDate(w.resets_at)})` : "초기화 시각 정보 없음"
+  drawTextAt(ctx, fmtPct(pct), W - 80, 2, 80, 22, Font.semiboldSystemFont(18), pctTextColor(pct, dim, p.text), "right")
+  drawBar(ctx, 0, 30, W, 8, pct, dim ? p.sub : pctColor(pct), p.track)
+  const reset = w.resets_at ? `${resetText(w.resets_at)} (${fmtDate(w.resets_at)})` : "초기화 시각 정보 없음"
   drawTextAt(ctx, reset, 0, 42, W, 16, Font.systemFont(11), p.sub)
   return ctx.getImage()
 }
@@ -1092,7 +1079,7 @@ function detailHeaderImage(acc, usage) {
   const W = cardWidth()
   const ctx = newCtx(W, 64)
   drawLogo(ctx, acc.provider, 0, 8, 40, p)
-  const right = drawPills(ctx, accountPills(usage, acc.enabled), W, 18, p)
+  const right = drawPills(ctx, statusPills(usage, { enabled: acc.enabled }), W, 18, p)
   drawTextAt(ctx, acc.label, 52, 6, right - 56, 28, Font.boldSystemFont(22), p.text)
   drawPlanBadge(ctx, acc.provider, usage.plan || acc.plan, { text: acc.label, x: 52, y: 6, size: 22, weight: 700 }, right - 6)
   drawTextAt(ctx, providerLine(acc), 52, 36, right - 56, 18, Font.systemFont(13), p.sub)
@@ -1110,19 +1097,44 @@ function resetCreditImage(item, index, provider) {
   fillRound(ctx, new Rect(0, 11, 36, 36), 10, new Color(brand.hex, p.dark ? 0.28 : 0.14))
   drawTextAt(ctx, String(index + 1), 0, 19, 36, 20, Font.boldSystemFont(16), brand, "center")
   // 남은 기간 배지
+  // 하루 이상 남으면 일 단위로만 (예: 4일 남음)
   const ms = item.expires_at ? new Date(item.expires_at).getTime() - Date.now() : null
-  const leftText = ms == null ? "만료 없음" : ms >= 86400000 ? `${Math.floor(ms / 86400000)}일 남음` : `${fmtUntil(item.expires_at)} 남음`
-  const soon = item.expires_at && new Date(item.expires_at).getTime() - Date.now() < 3 * 86400 * 1000
-  const right = drawPills(ctx, [{ text: leftText, color: soon ? C.warn : p.sub }], W, 19, p)
+  const left = fmtDuration(item.expires_at)
+  const leftText = ms == null ? "만료 없음" : ms >= D * 1000 ? `${Math.floor(ms / (D * 1000))}일 남음` : left ? `${left} 남음` : "곧 만료"
+  const soon = ms != null && ms < 3 * D * 1000
+  const right = drawPills(ctx, [soon ? { text: leftText, color: C.warn } : { text: leftText, muted: true }], W, 19, p)
   // 제목과 날짜
   const title = item.title || "사용량 초기화권"
   drawTextAt(ctx, title, 48, 10, right - 52, 20, Font.semiboldSystemFont(15), p.text)
-  const day = (iso) => { const d = new Date(iso); return `${d.getMonth() + 1}월 ${d.getDate()}일` }
-  const dates = [item.expires_at ? `${day(item.expires_at)} 만료` : null, item.granted_at ? `${day(item.granted_at)} 지급` : null]
+  const dates = [item.expires_at ? `${fmtDay(item.expires_at)} 만료` : null, item.granted_at ? `${fmtDay(item.granted_at)} 지급` : null]
     .filter(Boolean)
     .join("  ·  ")
   drawTextAt(ctx, dates || item.description || "", 48, 32, right - 52, 16, Font.systemFont(12), p.sub)
   return ctx.getImage()
+}
+
+function headerRow(text) {
+  const r = new UITableRow()
+  r.isHeader = true
+  r.addText(text)
+  return r
+}
+
+function textRow(title, subtitle, height = 54) {
+  const r = new UITableRow()
+  r.height = height
+  const c = r.addText(title, subtitle)
+  return { row: r, cell: c }
+}
+
+// 눌러도 표가 닫히지 않는 메뉴 행
+function actionRow(title, onSelect, color) {
+  const r = new UITableRow()
+  r.dismissOnSelect = false
+  const c = r.addText(title)
+  if (color) c.titleColor = color
+  r.onSelect = onSelect
+  return r
 }
 
 function imageRow(img, height) {
@@ -1146,77 +1158,50 @@ async function accountDetail(accountId) {
     await measureTexts(measureItemsFor(acc, usage, 22, 700))
     table.addRow(imageRow(detailHeaderImage(acc, usage), 80))
 
-    const st = new UITableRow()
-    st.height = usage.error || (usage.warnings || []).length ? 64 : 44
-    const stc = st.addText(
+    const detail = usage.error || (usage.warnings || []).join(" / ") || null
+    const st = textRow(
       `${STATUS_TEXT[usage.status] || usage.status}${usage.stale ? " · 이전 값 표시 중" : ""}  ·  ${fmtAgo(usage.fetched_at)} 조회`,
-      usage.error || (usage.warnings || []).join(" / ") || null
+      detail,
+      detail ? 64 : 44
     )
-    stc.titleFont = Font.systemFont(14)
-    stc.titleColor = usage.status === "ok" ? Color.gray() : usage.status === "partial" ? C.warn : C.bad
-    stc.subtitleColor = Color.gray()
-    table.addRow(st)
+    st.cell.titleFont = Font.systemFont(14)
+    st.cell.titleColor = usage.status === "ok" ? Color.gray() : usage.status === "partial" ? C.warn : C.bad
+    st.cell.subtitleColor = Color.gray()
+    table.addRow(st.row)
 
     if ((usage.windows || []).length) {
-      const sec = new UITableRow()
-      sec.isHeader = true
-      sec.addText("사용량")
-      table.addRow(sec)
+      table.addRow(headerRow("사용량"))
       const dim = usage.stale || usage.status === "needs_login"
       for (const w of usage.windows) table.addRow(imageRow(windowRowImage(w, dim), 72))
     }
 
-    const rc = usage.reset_credits
     // Antigravity 는 초기화권이 없으므로 섹션을 아예 표시하지 않는다
-    const showResets = acc.provider !== "antigravity"
-    const rcItems = rc ? rc.items || (rc.expirations || []).map((e) => ({ expires_at: e })) : []
-    const rcHead = new UITableRow()
-    rcHead.isHeader = true
-    rcHead.addText(rcItems.length ? `초기화권 ${rcItems.length}개` : "초기화권")
-    if (showResets) table.addRow(rcHead)
-    const rcRow = new UITableRow()
-    rcRow.height = 54
-    if (rc && rcItems.length) {
-      if (showResets) rcItems.forEach((item, i) => table.addRow(imageRow(resetCreditImage(item, i, acc.provider), 70)))
-    } else if (rc) {
-      rcRow.addText("사용 가능한 초기화권이 없습니다", "")
-    } else if (acc.auth && acc.auth.reset_credits_supported === false && acc.provider === "claude") {
-      rcRow.addText("sessionKey 가 없어 조회하지 않음", "아래 'sessionKey 설정'으로 추가하세요.")
-    } else {
-      rcRow.addText("없음 / 대상 아님", "")
-    }
-    if (showResets && !(rc && rcItems.length)) table.addRow(rcRow)
-
-    const extra = usage.extra || {}
-    if (extra.extra_usage || extra.credits) {
-      const r = new UITableRow()
-      r.height = 50
-      if (extra.extra_usage) {
-        const e = extra.extra_usage
-        r.addText("추가 사용량(Extra usage)", `${e.used ?? "–"} / ${e.limit ?? "–"} ${e.currency || ""} (${fmtPct(e.used_percent)})`)
+    if (acc.provider !== "antigravity") {
+      const rc = usage.reset_credits
+      const items = (rc && rc.items) || []
+      table.addRow(headerRow(items.length ? `초기화권 ${items.length}개` : "초기화권"))
+      if (items.length) {
+        items.forEach((item, i) => table.addRow(imageRow(resetCreditImage(item, i, acc.provider), 70)))
+      } else if (rc) {
+        table.addRow(textRow("사용 가능한 초기화권이 없습니다", "").row)
+      } else if (acc.provider === "claude" && !acc.auth.session_key) {
+        table.addRow(textRow("sessionKey 가 없어 조회하지 않음", "아래 'sessionKey 설정'으로 추가하세요.").row)
       } else {
-        const cr = extra.credits
-        r.addText("크레딧", cr.unlimited ? "무제한" : `잔액 ${cr.balance ?? "–"}`)
+        table.addRow(textRow("조회하지 못했습니다", usage.error || "").row)
       }
-      table.addRow(r)
     }
 
-    const actHead = new UITableRow()
-    actHead.isHeader = true
-    actHead.addText("관리")
-    table.addRow(actHead)
+    const { extra_usage: eu, credits: cr } = usage.extra || {}
+    if (eu) table.addRow(textRow("추가 사용량(Extra usage)", `${eu.used ?? "–"} / ${eu.limit ?? "–"} ${eu.currency || ""} (${fmtPct(eu.used_percent)})`, 50).row)
+    else if (cr) table.addRow(textRow("크레딧", cr.unlimited ? "무제한" : `잔액 ${cr.balance ?? "–"}`, 50).row)
 
-    const action = (title, fn, color) => {
-      const r = new UITableRow()
-      r.dismissOnSelect = false
-      const c = r.addText(title)
-      if (color) c.titleColor = color
-      r.onSelect = async () => {
+    table.addRow(headerRow("관리"))
+    // 작업 후 화면을 다시 그린다(삭제했으면 그리지 않음)
+    const action = (title, fn, color) =>
+      table.addRow(actionRow(title, async () => {
         await guarded(fn)
         if (!closed) await guarded(render)
-      }
-      table.addRow(r)
-    }
+      }, color))
 
     action("지금 새로고침", () => api("POST", `/v1/accounts/${accountId}/refresh`, undefined, 60))
     action("이름 변경", async () => {
@@ -1319,12 +1304,10 @@ async function mainMenu() {
     table.addRow(head)
 
     if (isDemo()) {
-      const r = new UITableRow()
-      r.height = 54
-      r.backgroundColor = new Color("#FF9F0A", 0.15)
-      const c = r.addText("데모 모드", "가짜 데이터입니다. 설정에서 끌 수 있어요.")
-      c.titleColor = new Color("#FF9F0A")
-      table.addRow(r)
+      const { row, cell } = textRow("데모 모드", "가짜 데이터입니다. 설정에서 끌 수 있어요.")
+      row.backgroundColor = new Color("#FF9F0A", 0.15)
+      cell.titleColor = C.warn
+      table.addRow(row)
     }
 
     let accounts = []
@@ -1340,24 +1323,13 @@ async function mainMenu() {
     }
 
     if (errorMsg) {
-      const r = new UITableRow()
-      r.height = 60
-      const c = r.addText("서버 오류", errorMsg)
-      c.titleColor = Color.red()
-      table.addRow(r)
+      const { row, cell } = textRow("서버 오류", errorMsg, 60)
+      cell.titleColor = Color.red()
+      table.addRow(row)
     }
 
-    const sec = new UITableRow()
-    sec.isHeader = true
-    sec.addText(`계정 (${accounts.length})`)
-    table.addRow(sec)
-
-    if (!accounts.length && !errorMsg) {
-      const r = new UITableRow()
-      r.addText("등록된 계정이 없습니다", "아래 '계정 추가'를 눌러 시작하세요.")
-      r.height = 54
-      table.addRow(r)
-    }
+    table.addRow(headerRow(`계정 (${accounts.length})`))
+    if (!accounts.length && !errorMsg) table.addRow(textRow("등록된 계정이 없습니다", "아래 '계정 추가'를 눌러 시작하세요.").row)
 
     await measureTexts(accounts.flatMap((acc) => measureItemsFor(acc, usage[acc.id], 17, 600)))
     for (const acc of accounts) {
@@ -1371,20 +1343,8 @@ async function mainMenu() {
       table.addRow(r)
     }
 
-    const actions = new UITableRow()
-    actions.isHeader = true
-    actions.addText("작업")
-    table.addRow(actions)
-
-    const action = (title, fn) => {
-      const r = new UITableRow()
-      r.dismissOnSelect = false
-      r.addText(title)
-      r.onSelect = async () => {
-        await guarded(fn)
-      }
-      table.addRow(r)
-    }
+    table.addRow(headerRow("작업"))
+    const action = (title, fn) => table.addRow(actionRow(title, () => guarded(fn)))
     action("계정 추가", async () => {
       await addAccount()
       await render(false)
