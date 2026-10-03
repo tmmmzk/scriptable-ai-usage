@@ -3,8 +3,9 @@
 // icon-color: deep-purple; icon-glyph: tachometer-alt;
 
 // AI 사용량 위젯 — Claude / Codex / Antigravity
-// 서버: https://github.com/tmmmzk/scriptable-ai-usage
+// https://github.com/tmmmzk/scriptable-ai-usage
 //
+// • 두 가지 방식: 서버 모드(직접 띄운 서버가 수집) / 기기 모드(서버 없이 이 스크립트가 직접 조회)
 // • 앱에서 실행하면 설정·계정 관리 화면이 열립니다.
 // • 위젯 Parameter 에 계정 이름(또는 id)을 쉼표로 적으면 그 계정만 표시합니다. 예) 개인,회사
 // • 서버 없이 디자인만 보려면 앱에서 '데모 모드'를 켜거나, 위젯 Parameter 에 demo 를 적으세요.
@@ -53,7 +54,8 @@ function setDemo(on) {
 }
 
 function getConfig() {
-  if (isDemo()) return { server: "데모 모드", apiKey: "demo", demo: true }
+  if (isDemo()) return { server: "데모 모드", demo: true }
+  if (getMode() === "device") return { server: "이 기기에서 직접 조회", device: true }
   const server = Keychain.contains(KC_SERVER) ? Keychain.get(KC_SERVER) : null
   const apiKey = Keychain.contains(KC_KEY) ? Keychain.get(KC_KEY) : null
   return server && apiKey ? { server, apiKey } : null
@@ -263,10 +265,1134 @@ async function demoApi(method, path, body) {
   throw new ApiError(`데모에서 지원하지 않는 요청: ${route}`, 404)
 }
 
+// ───────────────────────── 기기 모드 (서버 없이) ─────────────────────────
+// 서버가 하던 일(로그인·토큰 갱신·조회)을 이 스크립트가 직접 한다. 화면 쪽은 서버와 같은 API 형식을 그대로 쓴다.
+// 토큰은 키체인(계정별), 계정 목록·사용량은 기기 파일에 둔다. 위젯과 앱이 같은 저장소를 같이 쓴다.
+const KC_MODE = "aiusage.mode" // "server" | "device"
+const KC_AG_CLIENT = "aiusage.dev.antigravityClient"
+const DEV_ACCOUNTS_FILE = "aiusage-device-accounts.json"
+const DEV_LOGINS_FILE = "aiusage-device-logins.json"
+const DEV_AUTO_REFRESH_MS = 10 * 60 * 1000 // 이보다 오래된 값은 위젯·앱을 열 때 다시 조회
+const DEV_MIN_REFRESH_MS = 60 * 1000 // '새로고침'을 눌러도 이 간격 안에서는 다시 조회하지 않음
+const DEV_LOCK_MS = 30 * 1000
+const DEV_LOGIN_TTL_MS = 15 * 60 * 1000
+
+function getMode() {
+  if (Keychain.contains(KC_MODE)) return Keychain.get(KC_MODE)
+  return Keychain.contains(KC_SERVER) ? "server" : null // 기기 모드가 생기기 전 설정
+}
+
+function setMode(mode) {
+  Keychain.set(KC_MODE, mode)
+}
+
+// ── 바이트·인코딩 (Scriptable 에는 crypto 가 없어 PKCE 용 SHA-256 등을 직접 구현) ──
+function utf8Bytes(str) {
+  const out = []
+  for (const ch of str) {
+    const c = ch.codePointAt(0)
+    if (c < 0x80) out.push(c)
+    else if (c < 0x800) out.push(0xc0 | (c >> 6), 0x80 | (c & 63))
+    else if (c < 0x10000) out.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63))
+    else out.push(0xf0 | (c >> 18), 0x80 | ((c >> 12) & 63), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63))
+  }
+  return out
+}
+
+function utf8Decode(bytes) {
+  let s = ""
+  for (let i = 0; i < bytes.length; ) {
+    const b = bytes[i++]
+    let c = b
+    if (b >= 0xf0) c = ((b & 7) << 18) | ((bytes[i++] & 63) << 12) | ((bytes[i++] & 63) << 6) | (bytes[i++] & 63)
+    else if (b >= 0xe0) c = ((b & 15) << 12) | ((bytes[i++] & 63) << 6) | (bytes[i++] & 63)
+    else if (b >= 0xc0) c = ((b & 31) << 6) | (bytes[i++] & 63)
+    s += String.fromCodePoint(c)
+  }
+  return s
+}
+
+const B64_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+
+function b64url(bytes) {
+  let s = ""
+  for (let i = 0; i < bytes.length; i += 3) {
+    const n = (bytes[i] << 16) | ((bytes[i + 1] || 0) << 8) | (bytes[i + 2] || 0)
+    s += B64_CHARS[(n >> 18) & 63] + B64_CHARS[(n >> 12) & 63]
+    if (i + 1 < bytes.length) s += B64_CHARS[(n >> 6) & 63]
+    if (i + 2 < bytes.length) s += B64_CHARS[n & 63]
+  }
+  return s
+}
+
+// 일반·URL-safe base64 모두, 패딩이 없어도 읽는다
+function b64decode(str) {
+  const out = []
+  let buf = 0
+  let bits = 0
+  for (const ch of str.replace(/\+/g, "-").replace(/\//g, "_")) {
+    const v = B64_CHARS.indexOf(ch)
+    if (v < 0) continue
+    buf = (buf << 6) | v
+    bits += 6
+    if (bits >= 8) {
+      bits -= 8
+      out.push((buf >> bits) & 255)
+      buf &= (1 << bits) - 1
+    }
+  }
+  return out
+}
+
+const SHA256_K = [
+  0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5, 
+  0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 
+  0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 
+  0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 
+  0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 
+  0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 
+  0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3, 
+  0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
+]
+
+function sha256(bytes) {
+  const h = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19]
+  const bitLen = bytes.length * 8
+  const msg = bytes.concat([0x80])
+  while (msg.length % 64 !== 56) msg.push(0)
+  msg.push(0, 0, 0, 0, (bitLen >>> 24) & 255, (bitLen >>> 16) & 255, (bitLen >>> 8) & 255, bitLen & 255)
+  const rotr = (x, n) => (x >>> n) | (x << (32 - n))
+  const w = new Array(64)
+  for (let off = 0; off < msg.length; off += 64) {
+    for (let i = 0; i < 16; i++) {
+      const j = off + i * 4
+      w[i] = ((msg[j] << 24) | (msg[j + 1] << 16) | (msg[j + 2] << 8) | msg[j + 3]) >>> 0
+    }
+    for (let i = 16; i < 64; i++) {
+      const s0 = rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^ (w[i - 15] >>> 3)
+      const s1 = rotr(w[i - 2], 17) ^ rotr(w[i - 2], 19) ^ (w[i - 2] >>> 10)
+      w[i] = (w[i - 16] + s0 + w[i - 7] + s1) >>> 0
+    }
+    let [a, b, c, d, e, f, g, k] = h
+    for (let i = 0; i < 64; i++) {
+      const t1 = (k + (rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25)) + ((e & f) ^ (~e & g)) + SHA256_K[i] + w[i]) >>> 0
+      const t2 = ((rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22)) + ((a & b) ^ (a & c) ^ (b & c))) >>> 0
+      k = g
+      g = f
+      f = e
+      e = (d + t1) >>> 0
+      d = c
+      c = b
+      b = a
+      a = (t1 + t2) >>> 0
+    }
+    ;[a, b, c, d, e, f, g, k].forEach((v, i) => (h[i] = (h[i] + v) >>> 0))
+  }
+  return h.flatMap((v) => [(v >>> 24) & 255, (v >>> 16) & 255, (v >>> 8) & 255, v & 255])
+}
+
+// iOS 가 만드는 UUID(v4) 의 난수로 바이트를 채운다
+function randomBytes(n) {
+  let hex = ""
+  while (hex.length < n * 2) hex += UUID.string().replace(/-/g, "")
+  return Array.from({ length: n }, (_, i) => parseInt(hex.substr(i * 2, 2), 16))
+}
+
+const randomToken = (n = 32) => b64url(randomBytes(n))
+
+function pkcePair() {
+  const verifier = randomToken(32)
+  return { verifier, challenge: b64url(sha256(utf8Bytes(verifier))) }
+}
+
+// 서명 검증 없이 JWT payload 만 읽는다(표시·만료 계산용)
+function jwtClaims(token) {
+  try {
+    return JSON.parse(utf8Decode(b64decode(String(token).split(".")[1])))
+  } catch (e) {
+    return {}
+  }
+}
+
+const formEncode = (obj) =>
+  Object.entries(obj)
+    .filter(([, v]) => v != null)
+    .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
+    .join("&")
+
+// ── HTTP ──
+class ProviderError extends Error {
+  // kind: 위젯 상태로 그대로 쓰인다 (needs_login / rate_limited / blocked / error)
+  constructor(message, kind = "error") {
+    super(message)
+    this.kind = kind
+  }
+}
+
+class RefreshBusy extends Error {}
+
+const authError = (message) => new ProviderError(message, "needs_login")
+
+async function devHttp(method, url, { headers = {}, json, form, timeout = 15 } = {}) {
+  const req = new Request(url)
+  req.method = method
+  req.timeoutInterval = timeout
+  const h = { Accept: "application/json", ...headers }
+  if (json !== undefined) {
+    h["Content-Type"] = "application/json"
+    req.body = JSON.stringify(json)
+  } else if (form) {
+    h["Content-Type"] = "application/x-www-form-urlencoded"
+    req.body = formEncode(form)
+  }
+  req.headers = h
+  let text
+  try {
+    text = await req.loadString()
+  } catch (e) {
+    throw new ProviderError(`네트워크 오류: ${e.message || e}`)
+  }
+  const res = req.response || {}
+  const status = res.statusCode || 0
+  const hdrs = res.headers || {}
+  const cf = Object.keys(hdrs).find((k) => k.toLowerCase() === "cf-mitigated")
+  return {
+    status,
+    ok: status >= 200 && status < 300,
+    text: text || "",
+    challenge: !!cf && String(hdrs[cf]).toLowerCase() === "challenge",
+    json() {
+      try {
+        return JSON.parse(this.text)
+      } catch (e) {
+        throw new ProviderError(`JSON 파싱 실패: ${this.text.slice(0, 120)}`)
+      }
+    },
+  }
+}
+
+// 401/403(챌린지 제외) → 재로그인 필요
+function checkAuth(res, what) {
+  if ((res.status === 401 || res.status === 403) && !res.challenge) throw authError(`${what}: 인증 실패(HTTP ${res.status})`)
+}
+
+// 429, Cloudflare, 그 밖의 오류
+function checkCommon(res, what) {
+  if (res.status === 429) throw new ProviderError(`${what}: 요청 한도 초과(429)`, "rate_limited")
+  if (res.status === 403 && res.challenge) throw new ProviderError(`${what}: Cloudflare 챌린지로 차단됨`, "blocked")
+  if (!res.ok) throw new ProviderError(`${what}: HTTP ${res.status} ${res.text.slice(0, 160)}`)
+}
+
+// ── 정규화 공통 (서버의 providers/base.py 와 같은 형식) ──
+const isoOf = (ms) => (ms == null || isNaN(ms) ? null : new Date(ms).toISOString().replace(/\.\d{3}Z$/, "Z"))
+
+// ISO-8601 → epoch ms. 소수점 자릿수가 긴 값(나노초)도 처리.
+function msOf(v) {
+  if (typeof v !== "string" || !v.trim()) return null
+  const t = Date.parse(v.trim().replace(/(\.\d{3})\d+/, "$1"))
+  return isNaN(t) ? null : t
+}
+
+function num(v) {
+  if (typeof v === "number" && isFinite(v)) return v
+  if (typeof v === "string" && v.trim() && isFinite(Number(v))) return Number(v)
+  return null
+}
+
+const clampPct = (v) => (v == null ? null : Math.round(Math.max(0, Math.min(100, v)) * 10) / 10)
+
+function makeWindow(key, label, used, resetsAt, { seconds = null, group = null, primary = false } = {}) {
+  return {
+    key, label, group, used_percent: used,
+    remaining_percent: used == null ? null : Math.round((100 - used) * 10) / 10,
+    resets_at: resetsAt, window_seconds: seconds, primary,
+  }
+}
+
+function windowLabel(seconds) {
+  if (!seconds) return "?"
+  if (seconds % 86400 === 0) return seconds === 7 * 86400 ? "주간" : `${seconds / 86400}일`
+  return `${Math.round(seconds / 3600)}시간`
+}
+
+// 초기화권 한 장 → [정렬용 만료 ms, 응답용 항목]. 사용(redeem)용 id 는 넣지 않는다.
+function resetCredit(expires, granted = null, { title, description, reset_type } = {}) {
+  const text = (v) => (typeof v === "string" ? v : null)
+  return [expires, {
+    title: text(title), description: text(description), reset_type: text(reset_type),
+    granted_at: isoOf(granted), expires_at: isoOf(expires),
+  }]
+}
+
+function resetCreditsSummary(credits, available = null) {
+  const sorted = [...credits].sort((x, y) => (x[0] == null) - (y[0] == null) || (x[0] || 0) - (y[0] || 0))
+  const exps = sorted.map((c) => c[0])
+  return {
+    available: available != null ? available : sorted.length,
+    next_expires_at: exps.length && exps[0] ? isoOf(exps[0]) : null,
+    expirations: exps.map(isoOf),
+    items: sorted.map((c) => c[1]),
+  }
+}
+
+// 사용자가 붙여넣은 값 → { code, state }. 리다이렉트 전체 URL, code#state, code 만 모두 허용.
+function parseCallbackInput(raw) {
+  const text = String(raw || "").trim()
+  if (!text) throw new ProviderError("입력이 비어 있습니다.")
+  if (text.includes("://") || text.includes("code=")) {
+    const query = text.includes("?") ? text.split("?").slice(1).join("?").split("#")[0] : text
+    const params = {}
+    for (const part of query.split("&")) {
+      const [k, v = ""] = part.split("=")
+      if (k) params[decodeURIComponent(k)] = decodeURIComponent(v.replace(/\+/g, " "))
+    }
+    if (params.error) throw new ProviderError(`로그인 거부/실패: ${params.error}`)
+    if (!params.code) throw new ProviderError("URL에 code 파라미터가 없습니다. 주소창의 전체 URL을 복사했는지 확인하세요.")
+    return { code: params.code, state: params.state || null }
+  }
+  if (text.includes("#")) {
+    const [code, state] = text.split("#")
+    return { code: code.trim(), state: state.trim() || null }
+  }
+  return { code: text, state: null }
+}
+
+function checkState(expected, got) {
+  if (got != null && got !== expected) throw new ProviderError("state 값이 일치하지 않습니다. 로그인을 처음부터 다시 시작하세요.")
+}
+
+const authorizeUrl = (base, params) =>
+  `${base}?${Object.entries(params).map(([k, v]) => `${k}=${encodeURIComponent(v)}`).join("&")}`
+
+// ── Claude ──
+const CLAUDE = {
+  clientId: "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
+  authorizeUrl: "https://claude.com/cai/oauth/authorize",
+  tokenUrl: "https://platform.claude.com/v1/oauth/token",
+  redirectUri: "https://platform.claude.com/oauth/code/callback",
+  scopes: ["org:create_api_key", "user:profile", "user:inference", "user:sessions:claude_code", "user:mcp_servers", "user:file_upload"],
+  usageUrl: "https://api.anthropic.com/api/oauth/usage",
+  webBase: "https://claude.ai/api",
+  userAgent: "claude-code/2.1.0",
+  webUserAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1",
+}
+
+const CLAUDE_WINDOWS = [
+  ["five_hour", "session", "5시간", 5 * 3600, true],
+  ["seven_day", "weekly", "주간", 7 * 86400, true],
+  ["seven_day_opus", "weekly_opus", "Opus 주간", 7 * 86400, false],
+  ["seven_day_sonnet", "weekly_sonnet", "Sonnet 주간", 7 * 86400, false],
+]
+
+function claudeWindows(data) {
+  const out = []
+  const seen = new Set()
+  for (const [src, key, label, seconds, primary] of CLAUDE_WINDOWS) {
+    seen.add(src)
+    const b = data[src]
+    if (b && typeof b === "object" && b.utilization != null)
+      out.push(makeWindow(key, label, clampPct(num(b.utilization)), isoOf(msOf(b.resets_at)), { seconds, primary }))
+  }
+  // 그 밖에 utilization 을 가진 블록도 추가(새 한도가 생겨도 보이게)
+  for (const [src, b] of Object.entries(data)) {
+    if (seen.has(src) || src === "extra_usage" || src === "cedar_ember") continue
+    if (b && typeof b === "object" && b.utilization != null && "resets_at" in b)
+      out.push(makeWindow(src, src.replace("seven_day_", "주간 ").replace(/_/g, " "), clampPct(num(b.utilization)),
+        isoOf(msOf(b.resets_at)), { seconds: src.startsWith("seven_day") ? 7 * 86400 : null }))
+  }
+  return out
+}
+
+function claudeExtra(data) {
+  const e = data.extra_usage
+  if (!e || typeof e !== "object" || !e.is_enabled) return {}
+  return { extra_usage: { used: num(e.used_credits), limit: num(e.monthly_limit || e.monthly_credit_limit),
+    used_percent: clampPct(num(e.utilization)), currency: e.currency || null } }
+}
+
+// cedar_ember → 초기화권. 일시정지·소진·미시작·만료된 grant 는 빼고 resets_left 만큼 펼친다.
+function claudeResetCredits(block, at) {
+  if (!block || typeof block !== "object" || block.eligible !== true) return null
+  const credits = []
+  for (const g of block.grants || []) {
+    if (!g || typeof g !== "object") continue
+    const left = g.resets_left
+    if (!Number.isInteger(left) || left <= 0 || g.paused !== false) continue
+    const starts = msOf(g.starts_at)
+    const ends = msOf(g.ends_at)
+    if ((starts != null && starts > at) || (ends != null && ends <= at)) continue
+    if (credits.length + left > 50) return null
+    for (let i = 0; i < left; i++) credits.push(resetCredit(ends, starts))
+  }
+  return resetCreditsSummary(credits)
+}
+
+function claudeOAuth(data, prev = {}) {
+  if (!data.access_token) throw new ProviderError("토큰 응답에 access_token 이 없습니다.")
+  const scopes = typeof data.scope === "string" ? data.scope.split(" ") : data.scope
+  return {
+    access_token: data.access_token,
+    // 리프레시 토큰은 쓸 때마다 바뀐다. 응답에 없으면 이전 값을 유지.
+    refresh_token: data.refresh_token || prev.refresh_token,
+    expires_at: Date.now() + (num(data.expires_in) || 3600) * 1000,
+    scopes: scopes || prev.scopes || CLAUDE.scopes,
+  }
+}
+
+const claudeWebHeaders = (key) => ({ Cookie: `sessionKey=${key}`, "User-Agent": CLAUDE.webUserAgent })
+
+async function claudeWebOrg(sessionKey) {
+  const res = await devHttp("GET", `${CLAUDE.webBase}/organizations`, { headers: claudeWebHeaders(sessionKey) })
+  checkAuth(res, "sessionKey")
+  checkCommon(res, "claude.ai 조직 조회")
+  const orgs = res.json()
+  if (!Array.isArray(orgs) || !orgs.length) throw new ProviderError("claude.ai 조직 목록이 비어 있습니다.")
+  const caps = (o) => (o.capabilities || []).map((c) => String(c).toLowerCase())
+  return orgs.find((o) => caps(o).includes("chat")) || orgs.find((o) => caps(o).join() !== "api") || orgs[0]
+}
+
+async function claudeWebUsage(creds, ctx) {
+  if (!creds.org_id) {
+    creds = { ...creds, org_id: (await claudeWebOrg(creds.session_key)).uuid }
+    ctx.save(creds)
+  }
+  const base = `${CLAUDE.webBase}/organizations/${creds.org_id}/usage`
+  const headers = claudeWebHeaders(creds.session_key)
+  let res = await devHttp("GET", `${base}?cedar_ember=1`, { headers })
+  checkAuth(res, "sessionKey")
+  // 초기화권 옵트인이 거부되면 옵션 없이 한 번 더(사용량은 받을 수 있음)
+  if (!res.ok && res.status !== 429 && !res.challenge) res = await devHttp("GET", base, { headers })
+  checkCommon(res, "claude.ai 사용량")
+  return res.json()
+}
+
+const claudeProvider = {
+  methods: ["oauth", "session_key"],
+  configured: () => [true, null],
+  refreshToken: (c) => c.oauth && c.oauth.refresh_token,
+  needsRefresh: (c) => !!c.oauth && (c.oauth.expires_at || 0) - 5 * 60 * 1000 < Date.now(),
+
+  startLogin() {
+    const { verifier, challenge } = pkcePair()
+    const state = randomToken(24)
+    return {
+      authorize_url: authorizeUrl(CLAUDE.authorizeUrl, {
+        code: "true", client_id: CLAUDE.clientId, response_type: "code", redirect_uri: CLAUDE.redirectUri,
+        scope: CLAUDE.scopes.join(" "), code_challenge: challenge, code_challenge_method: "S256", state,
+      }),
+      instructions: "Claude 계정으로 로그인해 승인하면 코드가 표시됩니다. 'Copy Code'로 복사해 붙여넣으세요.",
+      input_hint: "code#state 형식의 코드",
+      pending: { verifier, state },
+    }
+  },
+
+  async finishLogin(pending, input) {
+    const { code, state } = parseCallbackInput(input)
+    checkState(pending.state, state)
+    const res = await devHttp("POST", CLAUDE.tokenUrl, { json: {
+      grant_type: "authorization_code", code, redirect_uri: CLAUDE.redirectUri, client_id: CLAUDE.clientId,
+      code_verifier: pending.verifier, state: pending.state,
+    } })
+    if (!res.ok) throw new ProviderError(`토큰 교환 실패: HTTP ${res.status} ${res.text.slice(0, 160)}`)
+    const data = res.json()
+    const creds = { oauth: claudeOAuth(data) }
+    if (data.organization && data.organization.uuid) creds.org_id = data.organization.uuid
+    const account = data.account || {}
+    return { creds, email: account.email_address || account.email || null }
+  },
+
+  async createManual({ session_key }) {
+    const key = String(session_key || "").trim()
+    if (!key.startsWith("sk-ant-")) throw new ProviderError("sessionKey 는 'sk-ant-' 로 시작해야 합니다.")
+    const org = await claudeWebOrg(key)
+    return { creds: { session_key: key, org_id: org.uuid }, email: null }
+  },
+
+  describe: (c) => ({ oauth: !!(c.oauth && c.oauth.refresh_token), session_key: !!c.session_key,
+    reset_credits_supported: !!c.session_key }),
+
+  async refresh(c) {
+    if (!c.oauth || !c.oauth.refresh_token) throw authError("리프레시 토큰이 없습니다. 다시 로그인하세요.")
+    const res = await devHttp("POST", CLAUDE.tokenUrl, { json: {
+      grant_type: "refresh_token", refresh_token: c.oauth.refresh_token, client_id: CLAUDE.clientId,
+      scope: (c.oauth.scopes || CLAUDE.scopes).join(" "),
+    } })
+    if ([400, 401, 403].includes(res.status)) throw authError(`토큰 갱신 거부(HTTP ${res.status}). 다시 로그인하세요.`)
+    checkCommon(res, "Claude 토큰 갱신")
+    return { ...c, oauth: claudeOAuth(res.json(), c.oauth) }
+  },
+
+  async fetch(creds, ctx) {
+    const usage = { windows: [], reset_credits: null, plan: null, email: null, extra: {}, warnings: [] }
+    if (creds.oauth) {
+      if (this.needsRefresh(creds)) creds = await ctx.refresh(creds)
+      const get = () => devHttp("GET", CLAUDE.usageUrl, { headers: {
+        Authorization: `Bearer ${creds.oauth.access_token}`, "anthropic-beta": "oauth-2025-04-20", "User-Agent": CLAUDE.userAgent,
+      } })
+      let res = await get()
+      if (res.status === 401) {
+        creds = await ctx.refresh(creds)
+        res = await get()
+      }
+      checkAuth(res, "Claude OAuth")
+      checkCommon(res, "Claude 사용량")
+      const data = res.json()
+      usage.windows = claudeWindows(data)
+      usage.extra = claudeExtra(data)
+    }
+    if (creds.session_key) {
+      let web = null
+      try {
+        web = await claudeWebUsage(creds, ctx)
+      } catch (e) {
+        if (!creds.oauth) throw e
+        usage.warnings.push(e.kind === "needs_login" ? `sessionKey 만료: ${e.message}` : `초기화권 조회 실패: ${e.message}`)
+      }
+      if (web) {
+        if (!usage.windows.length) {
+          usage.windows = claudeWindows(web)
+          usage.extra = claudeExtra(web)
+        }
+        usage.reset_credits = claudeResetCredits(web.cedar_ember, Date.now())
+      }
+    }
+    return usage
+  },
+}
+
+// ── Codex ──
+const CODEX = {
+  issuer: "https://auth.openai.com",
+  clientId: "app_EMoamEEZ73f0CkXaXp7hrann",
+  redirectUri: "http://localhost:1455/auth/callback",
+  apiBase: "https://chatgpt.com/backend-api",
+  userAgent: "codex_cli_rs/0.50.0 (iOS; arm64)",
+}
+
+function codexIdInfo(idToken) {
+  const claims = jwtClaims(idToken)
+  const auth = claims["https://api.openai.com/auth"] || {}
+  return { email: claims.email || null, account_id: auth.chatgpt_account_id || null, plan: auth.chatgpt_plan_type || null }
+}
+
+function codexCreds(data, prev = {}) {
+  if (!data.access_token) throw new ProviderError("토큰 응답에 access_token 이 없습니다.")
+  const id_token = data.id_token || prev.id_token
+  return {
+    access_token: data.access_token,
+    refresh_token: data.refresh_token || prev.refresh_token,
+    id_token,
+    account_id: codexIdInfo(id_token).account_id || prev.account_id,
+    last_refresh: Date.now(),
+  }
+}
+
+function codexWindow(raw, keyHint, group, primary) {
+  if (!raw || typeof raw !== "object") return null
+  const seconds = typeof raw.limit_window_seconds === "number" ? Math.round(raw.limit_window_seconds) : null
+  const reset = typeof raw.reset_at === "number" ? isoOf(raw.reset_at * 1000) : isoOf(msOf(raw.reset_at))
+  const key = seconds ? (seconds <= 86400 ? "session" : "weekly") : keyHint
+  return makeWindow(key, windowLabel(seconds), clampPct(num(raw.used_percent)), reset, { seconds, group, primary })
+}
+
+function codexWindows(data) {
+  const out = []
+  const rate = data.rate_limit || {}
+  for (const name of ["primary_window", "secondary_window"]) {
+    const w = codexWindow(rate[name], name, null, true)
+    if (w) out.push(w)
+  }
+  for (const extra of data.additional_rate_limits || []) {
+    if (!extra || typeof extra !== "object") continue
+    const name = extra.limit_name || extra.metered_feature || "추가 한도"
+    for (const wname of ["primary_window", "secondary_window"]) {
+      const w = codexWindow((extra.rate_limit || {})[wname], wname, name, false)
+      if (w) out.push({ ...w, key: `${name}:${w.key}` })
+    }
+  }
+  return out
+}
+
+function codexExtra(data) {
+  const c = data.credits
+  if (!c || typeof c !== "object" || !(c.has_credits || c.unlimited)) return {}
+  return { credits: { unlimited: !!c.unlimited, balance: num(c.balance) } }
+}
+
+function codexResetCredits(data, at) {
+  if (!data || typeof data !== "object") return null
+  const credits = []
+  for (const c of data.credits || []) {
+    if (!c || typeof c !== "object" || c.status !== "available") continue
+    const exp = msOf(c.expires_at)
+    if (exp != null && exp <= at) continue
+    credits.push(resetCredit(exp, msOf(c.granted_at), c))
+  }
+  const count = data.available_count
+  return resetCreditsSummary(credits, Number.isInteger(count) && count >= 0 ? count : null)
+}
+
+const codexProvider = {
+  methods: ["oauth"],
+  configured: () => [true, null],
+  refreshToken: (c) => c.refresh_token,
+  needsRefresh(c) {
+    const exp = jwtClaims(c.access_token).exp
+    if (typeof exp === "number") return exp * 1000 - 5 * 60 * 1000 < Date.now()
+    return (c.last_refresh || 0) + 50 * 60 * 1000 < Date.now()
+  },
+
+  startLogin() {
+    const { verifier, challenge } = pkcePair()
+    const state = randomToken(24)
+    return {
+      authorize_url: authorizeUrl(`${CODEX.issuer}/oauth/authorize`, {
+        response_type: "code", client_id: CODEX.clientId, redirect_uri: CODEX.redirectUri,
+        scope: "openid profile email offline_access", code_challenge: challenge, code_challenge_method: "S256",
+        id_token_add_organizations: "true", codex_cli_simplified_flow: "true", originator: "codex_cli_rs", state,
+      }),
+      instructions: "ChatGPT 계정으로 로그인하면 localhost 페이지로 이동하며 '연결할 수 없음'이 뜹니다. 정상입니다. 주소창의 전체 URL을 복사해 붙여넣으세요.",
+      input_hint: "http://localhost:1455/auth/callback?code=... 전체 URL",
+      pending: { verifier, state },
+    }
+  },
+
+  async finishLogin(pending, input) {
+    const { code, state } = parseCallbackInput(input)
+    checkState(pending.state, state)
+    const res = await devHttp("POST", `${CODEX.issuer}/oauth/token`, { form: {
+      grant_type: "authorization_code", code, redirect_uri: CODEX.redirectUri, client_id: CODEX.clientId,
+      code_verifier: pending.verifier,
+    } })
+    if (!res.ok) throw new ProviderError(`토큰 교환 실패: HTTP ${res.status} ${res.text.slice(0, 160)}`)
+    const creds = codexCreds(res.json())
+    const info = codexIdInfo(creds.id_token)
+    return { creds, email: info.email, plan: info.plan }
+  },
+
+  describe: (c) => ({ oauth: !!c.refresh_token, reset_credits_supported: true }),
+
+  async refresh(c) {
+    if (!c.refresh_token) throw authError("리프레시 토큰이 없습니다. 다시 로그인하세요.")
+    const res = await devHttp("POST", `${CODEX.issuer}/oauth/token`, { json: {
+      client_id: CODEX.clientId, grant_type: "refresh_token", refresh_token: c.refresh_token, scope: "openid profile email",
+    } })
+    if (res.status === 400 || res.status === 401) throw authError(`토큰 갱신 거부(HTTP ${res.status}) ${res.text.slice(0, 120)}`)
+    checkCommon(res, "Codex 토큰 갱신")
+    return codexCreds(res.json(), c)
+  },
+
+  async fetch(creds, ctx) {
+    if (this.needsRefresh(creds)) creds = await ctx.refresh(creds)
+    const get = (path, extra = {}) => devHttp("GET", `${CODEX.apiBase}${path}`, { headers: {
+      Authorization: `Bearer ${creds.access_token}`, "User-Agent": CODEX.userAgent, originator: "codex_cli_rs",
+      ...(creds.account_id ? { "ChatGPT-Account-Id": creds.account_id } : {}), ...extra,
+    } })
+    let res = await get("/wham/usage")
+    if (res.status === 401) {
+      creds = await ctx.refresh(creds)
+      res = await get("/wham/usage")
+    }
+    checkAuth(res, "Codex")
+    checkCommon(res, "Codex 사용량")
+    const data = res.json()
+    const usage = {
+      windows: codexWindows(data), reset_credits: null, extra: codexExtra(data), warnings: [],
+      plan: typeof data.plan_type === "string" ? data.plan_type : null, email: codexIdInfo(creds.id_token).email,
+    }
+    try {
+      const rc = await get("/wham/rate-limit-reset-credits", { "OpenAI-Beta": "codex-1" })
+      checkCommon(rc, "Codex 초기화권")
+      usage.reset_credits = codexResetCredits(rc.json(), Date.now())
+    } catch (e) {
+      usage.warnings.push(`초기화권 조회 실패: ${e.message}`)
+    }
+    return usage
+  },
+}
+
+// ── Antigravity ──
+const AG = {
+  authUrl: "https://accounts.google.com/o/oauth2/v2/auth",
+  tokenUrl: "https://oauth2.googleapis.com/token",
+  userinfoUrl: "https://www.googleapis.com/oauth2/v2/userinfo",
+  scopes: ["https://www.googleapis.com/auth/cloud-platform", "https://www.googleapis.com/auth/userinfo.email"],
+  apiBase: "https://cloudcode-pa.googleapis.com/v1internal",
+  redirectUri: "http://127.0.0.1:8585/callback",
+  userAgent: "antigravity/hub/2.9.1 darwin/arm64",
+  metadata: { ideType: "ANTIGRAVITY", platform: "PLATFORM_UNSPECIFIED", pluginType: "GEMINI" },
+}
+
+// Antigravity 앱의 Google OAuth 클라이언트(설정에서 입력)
+function agClient() {
+  try {
+    const c = JSON.parse(Keychain.contains(KC_AG_CLIENT) ? Keychain.get(KC_AG_CLIENT) : "null")
+    return c && c.id && c.secret ? c : null
+  } catch (e) {
+    return null
+  }
+}
+
+function agRequireClient() {
+  const c = agClient()
+  if (!c) throw new ProviderError("설정 → Antigravity 로그인 설정에서 Client ID/Secret 을 입력하세요.")
+  return c
+}
+
+function projectRef(v) {
+  if (typeof v === "string" && v.trim()) return v.trim()
+  if (v && typeof v === "object") return projectRef(v.id || v.projectId)
+  return null
+}
+
+function pickTier(info) {
+  const tiers = info.allowedTiers || []
+  const t = tiers.find((x) => x.isDefault && x.id) || tiers.find((x) => x.id)
+  return (t && t.id) || (info.paidTier || {}).id || (info.currentTier || {}).id || null
+}
+
+function resolvePlan(info, creds) {
+  const plan = (info.planInfo || {}).planType
+  if (plan) return plan
+  const tier = (info.currentTier || {}).id
+  const hosted = jwtClaims(creds.id_token).hd
+  return { "standard-tier": "Paid", "free-tier": hosted ? "Workspace" : "Free", "legacy-tier": "Legacy" }[tier]
+    || (info.currentTier || {}).name || null
+}
+
+const usedFromRemaining = (f) => (num(f) == null ? null : clampPct((1 - num(f)) * 100))
+const slug = (t) => t.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "") || "q"
+
+function agWindowSeconds(window) {
+  const w = String(window || "").toUpperCase()
+  if (w.includes("HOUR")) {
+    const m = w.match(/(\d+)/)
+    return m ? Number(m[1]) * 3600 : 5 * 3600
+  }
+  if (w.includes("WEEK")) return 7 * 86400
+  if (w.includes("DAY")) return 86400
+  return null
+}
+
+function agQuotaSummary(data) {
+  if (!data || typeof data !== "object") return []
+  const payload = data.response || data.summary || data
+  const out = []
+  for (const group of payload.groups || []) {
+    const gname = group.displayName || group.name || "Quota"
+    for (const b of group.buckets || []) {
+      const id = b.bucketId || b.id
+      if (b.disabled || !id) continue
+      let remaining = b.remainingFraction
+      if (remaining == null && b.remaining && typeof b.remaining === "object")
+        remaining = b.remaining.remainingFraction != null ? b.remaining.remainingFraction
+          : b.remaining.case === "remainingFraction" ? b.remaining.value : null
+      out.push(makeWindow(`${slug(gname)}:${id}`, b.displayName || b.name || id, usedFromRemaining(remaining),
+        isoOf(msOf(b.resetTime)), { seconds: agWindowSeconds(b.window), group: gname }))
+    }
+  }
+  return out
+}
+
+function agAvailableModels(data) {
+  return Object.entries((data || {}).models || {})
+    .sort(([a], [b]) => (a < b ? -1 : 1))
+    .filter(([, m]) => m && m.quotaInfo && m.quotaInfo.remainingFraction != null)
+    .map(([id, m]) => makeWindow(`model:${id}`, m.displayName || m.label || id,
+      usedFromRemaining(m.quotaInfo.remainingFraction), isoOf(msOf(m.quotaInfo.resetTime)), { group: "모델별" }))
+}
+
+function agQuotaBuckets(data) {
+  const best = {}
+  for (const b of (data || {}).buckets || []) {
+    const id = String(b.modelId || "").trim()
+    if (!id || b.remainingFraction == null) continue
+    if (!best[id] || b.remainingFraction < best[id].remainingFraction) best[id] = b
+  }
+  return Object.keys(best).sort().map((id) =>
+    makeWindow(`model:${id}`, id, usedFromRemaining(best[id].remainingFraction), isoOf(msOf(best[id].resetTime)), { group: "모델별" }))
+}
+
+// 작은 위젯에 보여줄 대표 창: 사용률이 가장 높은 것부터 2개
+function agMarkPrimary(windows) {
+  windows.filter((w) => w.used_percent != null).sort((a, b) => b.used_percent - a.used_percent)
+    .slice(0, 2).forEach((w) => (w.primary = true))
+  return windows
+}
+
+async function agPost(method, token, body) {
+  const res = await devHttp("POST", `${AG.apiBase}:${method}`, { json: body,
+    headers: { Authorization: `Bearer ${token}`, "User-Agent": AG.userAgent } })
+  if (res.status === 401) throw authError("Antigravity 인증 실패(401)")
+  if (res.status === 403) throw new ProviderError(`${method}: 권한 없음(403) ${res.text.slice(0, 160)}`)
+  checkCommon(res, `Antigravity ${method}`)
+  return res.json()
+}
+
+const antigravityProvider = {
+  methods: ["oauth"],
+  configured: () => (agClient() ? [true, null] : [false, "설정 → Antigravity 로그인 설정에서 Client ID/Secret 을 입력하세요."]),
+  refreshToken: (c) => c.refresh_token,
+  needsRefresh: (c) => (c.expires_at || 0) - 2 * 60 * 1000 < Date.now(),
+
+  startLogin() {
+    const state = randomToken(24)
+    return {
+      authorize_url: authorizeUrl(AG.authUrl, {
+        client_id: agRequireClient().id, redirect_uri: AG.redirectUri, response_type: "code", scope: AG.scopes.join(" "),
+        access_type: "offline", prompt: "select_account consent", state,
+      }),
+      instructions: "Antigravity 에서 쓰는 Google 계정으로 로그인하면 127.0.0.1 페이지로 이동하며 열리지 않습니다. 정상입니다. 주소창의 전체 URL을 복사해 붙여넣으세요.",
+      input_hint: "http://127.0.0.1:8585/callback?code=... 전체 URL",
+      pending: { state },
+    }
+  },
+
+  async finishLogin(pending, input) {
+    const client = agRequireClient()
+    const { code, state } = parseCallbackInput(input)
+    checkState(pending.state, state)
+    const res = await devHttp("POST", AG.tokenUrl, { form: {
+      code, client_id: client.id, client_secret: client.secret, redirect_uri: AG.redirectUri, grant_type: "authorization_code",
+    } })
+    if (!res.ok) throw new ProviderError(`토큰 교환 실패: HTTP ${res.status} ${res.text.slice(0, 160)}`)
+    const data = res.json()
+    if (!data.refresh_token) throw new ProviderError("refresh_token 을 받지 못했습니다. Google 계정 권한에서 앱 연결을 해제한 뒤 다시 시도하세요.")
+    const creds = { access_token: data.access_token, refresh_token: data.refresh_token,
+      expires_at: Date.now() + (num(data.expires_in) || 3600) * 1000, id_token: data.id_token || null }
+    let email = jwtClaims(creds.id_token).email || null
+    if (!email) {
+      const info = await devHttp("GET", AG.userinfoUrl, { headers: { Authorization: `Bearer ${creds.access_token}` } })
+      if (info.ok) email = info.json().email || null
+    }
+    return { creds, email }
+  },
+
+  describe: (c) => ({ oauth: !!c.refresh_token, project_id: !!c.project_id, reset_credits_supported: false }),
+
+  async refresh(c) {
+    const client = agRequireClient()
+    const res = await devHttp("POST", AG.tokenUrl, { form: {
+      client_id: client.id, client_secret: client.secret, refresh_token: c.refresh_token, grant_type: "refresh_token",
+    } })
+    if (res.status === 400 || res.status === 401) throw authError(`Google 토큰 갱신 거부(HTTP ${res.status}). 다시 로그인하세요.`)
+    checkCommon(res, "Google 토큰 갱신")
+    const d = res.json()
+    return { ...c, access_token: d.access_token, expires_at: Date.now() + (num(d.expires_in) || 3600) * 1000,
+      refresh_token: d.refresh_token || c.refresh_token, id_token: d.id_token || c.id_token }
+  },
+
+  // 프로젝트 ID 와 플랜. 프로젝트가 없으면 온보딩을 한 번 시도한다.
+  async codeAssist(creds, ctx) {
+    let info = await agPost("loadCodeAssist", creds.access_token, { metadata: AG.metadata })
+    let project = creds.project_id || projectRef(info.cloudaicompanionProject)
+    if (!project && pickTier(info)) {
+      try {
+        const ob = await agPost("onboardUser", creds.access_token, { tierId: pickTier(info), metadata: AG.metadata })
+        project = projectRef((ob.response || {}).cloudaicompanionProject)
+      } catch (e) {}
+      if (!project) {
+        info = await agPost("loadCodeAssist", creds.access_token, { metadata: AG.metadata })
+        project = projectRef(info.cloudaicompanionProject)
+      }
+    }
+    if (project && creds.project_id !== project) ctx.save({ ...creds, project_id: project })
+    return { project, plan: resolvePlan(info, creds) }
+  },
+
+  async fetch(creds, ctx) {
+    if (this.needsRefresh(creds)) creds = await ctx.refresh(creds)
+    let ca
+    try {
+      ca = await this.codeAssist(creds, ctx)
+    } catch (e) {
+      if (e.kind !== "needs_login") throw e
+      creds = await ctx.refresh(creds)
+      ca = await this.codeAssist(creds, ctx)
+    }
+    const body = ca.project ? { project: ca.project } : {}
+    const usage = { windows: [], reset_credits: null, extra: {}, warnings: [], plan: ca.plan,
+      email: jwtClaims(creds.id_token).email || null }
+    try {
+      usage.windows = agQuotaSummary(await agPost("retrieveUserQuotaSummary", creds.access_token, body))
+    } catch (e) {
+      usage.warnings.push(`요약 조회 실패, 모델별 조회로 대체: ${e.message}`)
+    }
+    if (!usage.windows.length) {
+      try {
+        usage.windows = agAvailableModels(await agPost("fetchAvailableModels", creds.access_token, body))
+      } catch (e) {
+        usage.windows = agQuotaBuckets(await agPost("retrieveUserQuota", creds.access_token, body))
+      }
+    }
+    agMarkPrimary(usage.windows)
+    return usage
+  },
+}
+
+const DEVICE_PROVIDERS = { claude: claudeProvider, codex: codexProvider, antigravity: antigravityProvider }
+
+// ── 기기 저장소 ──
+const devPath = (name) => fm.joinPath(fm.documentsDirectory(), name)
+
+function devRead(name, fallback) {
+  try {
+    const p = devPath(name)
+    return fm.fileExists(p) ? JSON.parse(fm.readString(p)) : fallback
+  } catch (e) {
+    return fallback
+  }
+}
+
+const devWrite = (name, data) => fm.writeString(devPath(name), JSON.stringify(data))
+const devAccounts = () => devRead(DEV_ACCOUNTS_FILE, []).sort((a, b) => (a.order || 0) - (b.order || 0))
+const devSaveAccounts = (list) => devWrite(DEV_ACCOUNTS_FILE, list)
+// 사용량은 계정마다 파일을 나눠, 여러 위젯이 동시에 써도 서로 덮어쓰지 않게 한다
+const devSnapName = (id) => `aiusage-device-snap-${id}.json`
+const devGetSnap = (id) => devRead(devSnapName(id), null)
+const devPutSnap = (id, snap) => devWrite(devSnapName(id), snap)
+const devCredKey = (id) => `aiusage.dev.creds.${id}`
+
+function devGetCreds(id) {
+  try {
+    return Keychain.contains(devCredKey(id)) ? JSON.parse(Keychain.get(devCredKey(id))) : null
+  } catch (e) {
+    return null
+  }
+}
+
+const devSaveCreds = (id, creds) => Keychain.set(devCredKey(id), JSON.stringify(creds))
+
+function devFind(id) {
+  const acc = devAccounts().find((a) => a.id === id)
+  if (!acc) throw new ApiError("계정이 없습니다.", 404)
+  return acc
+}
+
+function devUpdateAccount(id, fn) {
+  const list = devAccounts()
+  const acc = list.find((a) => a.id === id)
+  if (!acc) throw new ApiError("계정이 없습니다.", 404)
+  fn(acc)
+  devSaveAccounts(list)
+  return acc
+}
+
+// 토큰 갱신 잠금: 위젯 여러 개와 앱이 동시에 갱신하면 회전된 리프레시 토큰이 무효가 될 수 있다
+const devLockName = (id) => `aiusage-device-lock-${id}`
+
+function devTryLock(id) {
+  const p = devPath(devLockName(id))
+  try {
+    if (fm.fileExists(p) && Date.now() - Number(fm.readString(p)) < DEV_LOCK_MS) return false
+  } catch (e) {}
+  fm.writeString(p, String(Date.now()))
+  return true
+}
+
+function devUnlock(id) {
+  try {
+    fm.remove(devPath(devLockName(id)))
+  } catch (e) {}
+}
+
+async function devRefreshCreds(acc, provider, creds) {
+  // 다른 위젯/앱이 먼저 갱신했다면 저장된 새 토큰을 쓴다
+  const latest = devGetCreds(acc.id) || creds
+  if (provider.refreshToken(latest) !== provider.refreshToken(creds) && !provider.needsRefresh(latest)) return latest
+  if (!devTryLock(acc.id)) throw new RefreshBusy()
+  try {
+    const next = await provider.refresh(latest)
+    devSaveCreds(acc.id, next) // 회전된 리프레시 토큰을 즉시 저장
+    return next
+  } finally {
+    devUnlock(acc.id)
+  }
+}
+
+// 한 계정을 조회해 스냅샷을 갱신한다. minAgeMs 보다 최근에 조회했으면 그대로 둔다.
+async function devRefreshAccount(acc, minAgeMs) {
+  const prev = devGetSnap(acc.id) || {}
+  if (Date.now() - (msOf(prev.fetched_at) || 0) < minAgeMs) return prev
+  const provider = DEVICE_PROVIDERS[acc.provider]
+  const snap = { ...prev, fetched_at: isoOf(Date.now()) }
+  try {
+    const creds = devGetCreds(acc.id)
+    if (!creds) throw authError("저장된 로그인 정보가 없습니다. 다시 로그인하세요.")
+    const ctx = {
+      refresh: (c) => devRefreshCreds(acc, provider, c),
+      save: (c) => devSaveCreds(acc.id, c),
+    }
+    const u = await provider.fetch(creds, ctx)
+    Object.assign(snap, {
+      status: u.warnings.length ? "partial" : "ok", error: null, warnings: u.warnings, stale: false,
+      windows: u.windows, reset_credits: u.reset_credits, extra: u.extra,
+      plan: u.plan || prev.plan || null, email: u.email || prev.email || null, last_success_at: snap.fetched_at,
+    })
+  } catch (e) {
+    if (e instanceof RefreshBusy) return prev // 다른 곳에서 갱신 중 — 다음 차례에 다시
+    Object.assign(snap, { status: e.kind || "error", error: e.message || String(e), stale: !!(prev.windows || []).length })
+  }
+  devPutSnap(acc.id, snap)
+  return snap
+}
+
+function devCommon(acc, snap) {
+  return {
+    id: acc.id, provider: acc.provider, provider_name: providerName(acc.provider), label: acc.label,
+    email: acc.email || snap.email || null, status: snap.status || "pending", error: snap.error || null,
+    fetched_at: snap.fetched_at || null, last_success_at: snap.last_success_at || null,
+  }
+}
+
+function devPublic(acc) {
+  const snap = devGetSnap(acc.id) || {}
+  const provider = DEVICE_PROVIDERS[acc.provider]
+  return { ...devCommon(acc, snap), plan: snap.plan || acc.plan || null, enabled: acc.enabled !== false,
+    order: acc.order || 0, created_at: acc.created_at, auth: provider ? provider.describe(devGetCreds(acc.id) || {}) : {} }
+}
+
+function devUsageEntry(acc) {
+  const snap = devGetSnap(acc.id) || {}
+  return { ...devCommon(acc, snap), plan: snap.plan || acc.plan || null, warnings: snap.warnings || [],
+    stale: !!snap.stale, windows: snap.windows || [], reset_credits: snap.reset_credits || null, extra: snap.extra || {} }
+}
+
+function devUpsert(provider, accountId, label, result) {
+  const list = devAccounts()
+  const email = (result.email || "").toLowerCase()
+  let acc = accountId ? list.find((a) => a.id === accountId)
+    : email ? list.find((a) => a.provider === provider && (a.email || "").toLowerCase() === email) : null
+  if (acc) {
+    // Claude 는 sessionKey 를 유지한 채 OAuth 만 교체
+    devSaveCreds(acc.id, { ...(devGetCreds(acc.id) || {}), ...result.creds })
+    if (result.email) acc.email = result.email
+    if (result.plan) acc.plan = result.plan
+    if (label) acc.label = label
+  } else {
+    acc = {
+      id: `${provider}_${randomBytes(4).map((b) => b.toString(16).padStart(2, "0")).join("")}`,
+      provider, label: label || (result.email ? result.email.split("@")[0] : providerName(provider)),
+      email: result.email || null, plan: result.plan || null, enabled: true,
+      order: Math.max(0, ...list.map((a) => a.order || 0)) + 1, created_at: isoOf(Date.now()),
+    }
+    list.push(acc)
+    devSaveCreds(acc.id, result.creds)
+  }
+  devSaveAccounts(list)
+  return acc
+}
+
+function devProvider(id) {
+  const p = DEVICE_PROVIDERS[id]
+  if (!p) throw new ApiError(`알 수 없는 서비스: ${id}`, 400)
+  return p
+}
+
+// 서버의 /v1 API 를 기기 안에서 처리한다
+async function deviceApi(method, path, body) {
+  const route = `${method} ${path.split("?")[0]}`
+  let m
+  try {
+    if (route === "GET /v1/usage") {
+      const accounts = devAccounts().filter((a) => a.enabled !== false)
+      const minAge = path.includes("refresh=1") ? DEV_MIN_REFRESH_MS : DEV_AUTO_REFRESH_MS
+      await Promise.all(accounts.map((a) => devRefreshAccount(a, minAge)))
+      const entries = accounts.map(devUsageEntry)
+      // 가장 오래된 조회 시각을 '업데이트' 시각으로 보여준다
+      const oldest = Math.min(...entries.map((e) => msOf(e.fetched_at) || Date.now()), Date.now())
+      return { generated_at: isoOf(oldest), poll_interval: 0, accounts: entries }
+    }
+    if (route === "GET /v1/providers") {
+      return { providers: Object.entries(DEVICE_PROVIDERS).map(([id, p]) => {
+        const [configured, reason] = p.configured()
+        return { id, name: providerName(id), methods: p.methods, configured, reason }
+      }) }
+    }
+    if (route === "GET /v1/accounts") return { accounts: devAccounts().map(devPublic) }
+    if (route === "POST /v1/accounts") {
+      const result = await devProvider(body.provider).createManual(body)
+      const acc = devUpsert(body.provider, null, body.label, result)
+      await devRefreshAccount(acc, 0)
+      return devPublic(acc)
+    }
+    if (route === "POST /v1/logins") {
+      const p = devProvider(body.provider)
+      if (body.account_id) devFind(body.account_id)
+      const start = p.startLogin()
+      const logins = devRead(DEV_LOGINS_FILE, {})
+      for (const [k, v] of Object.entries(logins)) if (Date.now() - v.created > DEV_LOGIN_TTL_MS) delete logins[k]
+      const loginId = randomToken(16)
+      logins[loginId] = { provider: body.provider, label: body.label || null, account_id: body.account_id || null,
+        pending: start.pending, created: Date.now() }
+      devWrite(DEV_LOGINS_FILE, logins)
+      return { login_id: loginId, provider: body.provider, authorize_url: start.authorize_url,
+        instructions: start.instructions, input_hint: start.input_hint }
+    }
+    if ((m = route.match(/^POST \/v1\/logins\/([\w-]+)\/complete$/))) {
+      const logins = devRead(DEV_LOGINS_FILE, {})
+      const entry = logins[m[1]]
+      if (!entry || Date.now() - entry.created > DEV_LOGIN_TTL_MS)
+        throw new ApiError("로그인 세션이 없거나 만료되었습니다. 처음부터 다시 시작하세요.", 400)
+      const result = await devProvider(entry.provider).finishLogin(entry.pending, body.input)
+      delete logins[m[1]]
+      devWrite(DEV_LOGINS_FILE, logins)
+      const acc = devUpsert(entry.provider, entry.account_id, entry.label, result)
+      await devRefreshAccount(acc, 0)
+      return devPublic(devFind(acc.id))
+    }
+    if ((m = route.match(/^GET \/v1\/accounts\/([\w-]+)$/))) {
+      const acc = devFind(m[1])
+      return { account: devPublic(acc), usage: devUsageEntry(acc) }
+    }
+    if ((m = route.match(/^PATCH \/v1\/accounts\/([\w-]+)$/))) {
+      const id = m[1]
+      const sessionKey = body.session_key
+      if (sessionKey != null) {
+        if (devFind(id).provider !== "claude") throw new ApiError("session_key 는 Claude 계정에만 설정할 수 있습니다.", 400)
+        const creds = devGetCreds(id) || {}
+        if (sessionKey && !String(sessionKey).startsWith("sk-ant-")) throw new ApiError("sessionKey 는 'sk-ant-' 로 시작해야 합니다.", 400)
+        if (!sessionKey && !creds.oauth) throw new ApiError("OAuth 로그인이 없는 계정에서는 sessionKey 를 지울 수 없습니다.", 400)
+        const next = { ...creds }
+        if (sessionKey) {
+          next.session_key = sessionKey
+        } else {
+          delete next.session_key
+        }
+        devSaveCreds(id, next)
+      }
+      const acc = devUpdateAccount(id, (a) => {
+        if (body.label && String(body.label).trim()) a.label = String(body.label).trim()
+        if ("enabled" in body) a.enabled = !!body.enabled
+      })
+      if (sessionKey != null) await devRefreshAccount(acc, 0)
+      return devPublic(acc)
+    }
+    if ((m = route.match(/^DELETE \/v1\/accounts\/([\w-]+)$/))) {
+      const id = m[1]
+      devFind(id)
+      devSaveAccounts(devAccounts().filter((a) => a.id !== id))
+      if (Keychain.contains(devCredKey(id))) Keychain.remove(devCredKey(id))
+      for (const name of [devSnapName(id), devLockName(id)]) if (fm.fileExists(devPath(name))) fm.remove(devPath(name))
+      return { deleted: id }
+    }
+    if ((m = route.match(/^POST \/v1\/accounts\/([\w-]+)\/refresh$/))) {
+      const acc = devFind(m[1])
+      await devRefreshAccount(acc, 0)
+      return devUsageEntry(acc)
+    }
+  } catch (e) {
+    if (e instanceof ProviderError) throw new ApiError(e.message, 400)
+    throw e
+  }
+  throw new ApiError(`지원하지 않는 요청: ${route}`, 404)
+}
+
 async function api(method, path, body, timeout = 25) {
   const cfg = getConfig()
   if (!cfg) throw new ApiError("서버 설정이 필요합니다.", 0)
   if (cfg.demo) return demoApi(method, path, body || {})
+  if (cfg.device) return deviceApi(method, path, body || {})
   const req = new Request(cfg.server.replace(/\/+$/, "") + path)
   req.method = method
   req.timeoutInterval = timeout
@@ -749,7 +1875,7 @@ async function runWidget() {
   }
   let widget
   if (!getConfig()) {
-    widget = emptyWidget("Scriptable 앱에서 이 스크립트를 실행해 서버를 설정하세요.")
+    widget = emptyWidget("Scriptable 앱에서 이 스크립트를 실행해 연결 방식을 고르세요.")
   } else {
     try {
       const result = await loadUsage(false)
@@ -828,6 +1954,7 @@ async function setupServer() {
   if (!key) return false
   Keychain.set(KC_SERVER, server.replace(/\/+$/, ""))
   Keychain.set(KC_KEY, key)
+  setMode("server")
   setDemo(false)
   try {
     await api("GET", "/v1/accounts")
@@ -837,6 +1964,27 @@ async function setupServer() {
     await alertMsg("연결 실패", `${e.message}\n설정은 저장되었습니다. 주소와 키를 확인하세요.`)
     return false
   }
+}
+
+async function useDeviceMode() {
+  setMode("device")
+  setDemo(false)
+  await alertMsg("기기 모드", "서버 없이 이 스크립트가 직접 조회합니다.\n로그인 정보는 iOS 키체인에 저장되고, 계정 목록은 서버 모드와 따로 관리됩니다.\n\n'계정 추가'로 시작하세요.")
+  return true
+}
+
+const AG_CLIENT_HELP =
+  "Antigravity 앱 설치 폴더의 resources/app/out/main.js 에서 '….apps.googleusercontent.com' 으로 끝나는 값(Client ID)과 'GOCSPX-' 로 시작하는 값(Client Secret)을 찾아 넣으세요."
+
+async function setupAntigravityClient() {
+  const cur = agClient() || {}
+  const id = await prompt("Antigravity Client ID", AG_CLIENT_HELP, { value: cur.id || "", placeholder: "….apps.googleusercontent.com" })
+  if (!id) return false
+  const secret = await prompt("Antigravity Client Secret", "GOCSPX- 로 시작하는 값", { secure: true, value: cur.secret || "", placeholder: "GOCSPX-…" })
+  if (!secret) return false
+  Keychain.set(KC_AG_CLIENT, JSON.stringify({ id, secret }))
+  await alertMsg("저장됨", "이제 Antigravity 계정을 추가할 수 있습니다.")
+  return true
 }
 
 // ───────────────────────── 앱 UI: 로그인 ─────────────────────────
@@ -888,11 +2036,14 @@ const SESSION_KEY_HELP =
 
 async function addAccount() {
   const { providers } = await api("GET", "/v1/providers")
-  const labels = providers.map((p) => (p.configured ? p.name : `${p.name} (서버 설정 필요)`))
+  const labels = providers.map((p) => (p.configured ? p.name : `${p.name} (설정 필요)`))
   const i = await choose("계정 추가", "서비스를 선택하세요.", labels)
   if (i < 0) return
   const p = providers[i]
-  if (!p.configured) return alertMsg("설정 필요", p.reason)
+  if (!p.configured) {
+    if (!getConfig().device || p.id !== "antigravity") return alertMsg("설정 필요", p.reason)
+    if (!(await setupAntigravityClient())) return
+  }
 
   const label = await prompt("이름 (선택)", "위젯에 표시할 이름. 비우면 이메일 앞부분을 씁니다.", { placeholder: "예) 개인" })
   if (label === null) return
@@ -1235,7 +2386,7 @@ async function accountDetail(accountId) {
     action(
       "계정 삭제",
       async () => {
-        if (await confirm("계정 삭제", `${acc.label} 계정과 저장된 토큰을 서버에서 삭제합니다.`, "삭제", true)) {
+        if (await confirm("계정 삭제", `${acc.label} 계정과 저장된 로그인 정보를 ${getConfig().device ? "이 기기" : "서버"}에서 삭제합니다.`, "삭제", true)) {
           await api("DELETE", `/v1/accounts/${accountId}`)
           closed = true
           await alertMsg("삭제됨", "닫기를 눌러 목록으로 돌아가세요.")
@@ -1255,10 +2406,18 @@ async function accountDetail(accountId) {
 // ───────────────────────── 앱 UI: 설정 메뉴 ─────────────────────────
 // 자주 쓰지 않는 항목을 모은다. 화면을 다시 그려야 하면 true.
 async function settingsMenu() {
-  const items = []
-  items.push(isDemo()
-    ? { label: "서버 연결 (데모 종료)", run: () => setupServer() }
-    : { label: "서버 주소 / API 키 변경", run: () => setupServer() })
+  const mode = getMode()
+  const modeName = mode === "device" ? "이 기기" : mode === "server" ? "서버" : "없음"
+  const items = [{
+    label: `연결 방식 바꾸기 (현재: ${isDemo() ? "데모" : modeName})`,
+    run: async () => {
+      const i = await choose("연결 방식", "서버와 기기 모드는 계정 목록을 따로 관리합니다.", ["서버에 연결", "이 기기에서 직접 조회 (서버 없음)"])
+      if (i === 0) await setupServer()
+      if (i === 1) await useDeviceMode()
+    },
+  }]
+  if (mode === "server" && !isDemo()) items.push({ label: "서버 주소 / API 키 변경", run: () => setupServer() })
+  if (mode === "device" && !isDemo()) items.push({ label: `Antigravity 로그인 설정${agClient() ? " (입력됨)" : ""}`, run: () => setupAntigravityClient() })
   items.push({
     label: `Claude 로고 바꾸기 (현재: ${claudeLogo() === "clawd" ? "Clawd" : "기본"})`,
     run: () => {
@@ -1268,7 +2427,7 @@ async function settingsMenu() {
   })
   if (isDemo()) {
     items.push({ label: "데모 데이터 초기화", run: () => demoReset() })
-    if (Keychain.contains(KC_SERVER)) items.push({ label: "데모 종료 (기존 서버로)", run: () => setDemo(false) })
+    if (mode) items.push({ label: `데모 종료 (${modeName} 모드로)`, run: () => setDemo(false) })
   } else {
     items.push({ label: "데모 모드로 보기", run: () => setDemo(true) })
   }
@@ -1283,12 +2442,14 @@ async function mainMenu() {
   if (!getConfig()) {
     const i = await choose(
       "처음 설정",
-      "사용량 서버에 연결하거나, 서버 없이 가짜 데이터로 UI 와 위젯을 먼저 둘러볼 수 있습니다.",
-      ["서버 연결", "데모 모드로 둘러보기"],
+      "직접 띄운 서버에 연결하거나, 서버 없이 이 기기에서 바로 조회할 수 있습니다. 가짜 데이터로 먼저 둘러볼 수도 있어요.",
+      ["서버에 연결", "이 기기에서 직접 조회 (서버 없음)", "데모 모드로 둘러보기"],
       false
     )
-    if (i === 1) setDemo(true)
-    else if (i !== 0 || !(await setupServer())) return
+    if (i === 0 && !(await setupServer())) return
+    if (i === 1) await useDeviceMode()
+    if (i === 2) setDemo(true)
+    if (i < 0) return
   }
 
   const table = new UITable()
@@ -1323,7 +2484,7 @@ async function mainMenu() {
     }
 
     if (errorMsg) {
-      const { row, cell } = textRow("서버 오류", errorMsg, 60)
+      const { row, cell } = textRow(getConfig().device ? "불러오기 실패" : "서버 오류", errorMsg, 60)
       cell.titleColor = Color.red()
       table.addRow(row)
     }
