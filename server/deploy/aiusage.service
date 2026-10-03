@@ -1,0 +1,26 @@
+[Unit]
+Description=AI usage aggregator (Claude / Codex / Antigravity)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=aiusage
+Group=aiusage
+WorkingDirectory=/opt/aiusage/server
+EnvironmentFile=/etc/aiusage.env
+ExecStart=/usr/bin/python3 -m aiusage
+Restart=on-failure
+RestartSec=5
+
+# 하드닝
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+StateDirectory=aiusage
+StateDirectoryMode=0700
+ReadWritePaths=/var/lib/aiusage
+
+[Install]
+WantedBy=multi-user.target

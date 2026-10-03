@@ -1,0 +1,16 @@
+services:
+  aiusage:
+    build: ..
+    restart: unless-stopped
+    env_file: ./aiusage.env
+    environment:
+      AIUSAGE_HOST: 0.0.0.0
+      AIUSAGE_DATA_DIR: /data
+    volumes:
+      - aiusage-data:/data
+    ports:
+      # 리버스 프록시가 같은 호스트에 있다면 로컬에만 노출
+      - "127.0.0.1:8787:8787"
+
+volumes:
+  aiusage-data:
