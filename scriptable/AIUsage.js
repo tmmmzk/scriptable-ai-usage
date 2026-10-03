@@ -9,12 +9,12 @@
 // • 앱에서 실행하면 설정·계정 관리 화면이 열립니다.
 // • 위젯 Parameter 에 계정 이름(또는 id)을 쉼표로 적으면 그 계정만 표시합니다. 예) 개인,회사
 
-const VERSION = "0.4.0"
+const VERSION = "0.5.0"
+// 앱의 '업데이트'가 새 버전을 받아오는 주소(공개 저장소의 raw 파일). 포크했다면 여기를 바꾸세요.
+const UPDATE_URL = "https://raw.githubusercontent.com/tmmmzk/scriptable-ai-usage/main/scriptable/AIUsage.js"
 const KC_SERVER = "aiusage.server"
 const KC_KEY = "aiusage.apikey"
-const CACHE_FILE = "aiusage-cache.json"
 const APP_TITLE = "AI Usage"
-const WIDGET_REFRESH_MIN = 15
 
 const PROVIDER_STYLE = {
   claude: { color: "#D97757", name: "Claude", abbr: "CL" },
@@ -72,21 +72,15 @@ const DAY_MS = 86400 * 1000
 // ───────────────────────── 기기 모드 (서버 없이) ─────────────────────────
 // 서버가 하던 일(로그인·토큰 갱신·조회)을 이 스크립트가 직접 한다. 화면 쪽은 서버와 같은 API 형식을 그대로 쓴다.
 // 토큰은 키체인(계정별), 계정 목록·사용량은 기기 파일에 둔다. 위젯과 앱이 같은 저장소를 같이 쓴다.
-const KC_MODE = "aiusage.mode" // "server" | "device"
 const KC_AG_CLIENT = "aiusage.dev.antigravityClient"
-const DEV_ACCOUNTS_FILE = "aiusage-device-accounts.json"
-const DEV_LOGINS_FILE = "aiusage-device-logins.json"
-const DEV_AUTO_REFRESH_MS = 10 * 60 * 1000 // 이보다 오래된 값은 위젯·앱을 열 때 다시 조회
-const DEV_MIN_REFRESH_MS = 60 * 1000 // '새로고침'을 눌러도 이 간격 안에서는 다시 조회하지 않음
-const DEV_LOCK_MS = 30 * 1000
-const DEV_LOGIN_TTL_MS = 15 * 60 * 1000
 
+// "server" | "device". 저장된 값이 없는데 서버 주소가 있으면 기기 모드가 생기기 전 설정이다.
 function getMode() {
-  return kcGet(KC_MODE) || (Keychain.contains(KC_SERVER) ? "server" : null) // 뒤쪽은 기기 모드가 생기기 전 설정
+  return kcGet("aiusage.mode") || (Keychain.contains(KC_SERVER) ? "server" : null)
 }
 
 function setMode(mode) {
-  Keychain.set(KC_MODE, mode)
+  Keychain.set("aiusage.mode", mode)
 }
 
 // ── 바이트·인코딩 (Scriptable 에는 crypto 가 없어 PKCE 용 SHA-256 등을 직접 구현) ──
@@ -396,8 +390,7 @@ const CLAUDE_WINDOWS = [
 
 // limits[] 의 모델별 주간 한도도 알려진 모델만 보여준다. Claude Code 는 허용 목록(기본 Fable)으로
 // 거르고, 목록에 없는 행에는 코드네임 모델이 섞여 온다. 새 버전(예: Fable 6)은 계열 이름으로 통과시킨다.
-const CLAUDE_MODEL_FAMILIES = /^(fable|opus|sonnet|haiku)\b/i
-const claudeModelShown = (name) => typeof name === "string" && CLAUDE_MODEL_FAMILIES.test(name.trim())
+const claudeModelShown = (name) => typeof name === "string" && /^(fable|opus|sonnet|haiku)\b/i.test(name.trim())
 
 // 저장된 창 중 보여줄 것. 예전 버전이 저장한 코드네임 창(iguana_necktie 등)도 여기서 걸러진다.
 function claudeWindowShown(w) {
@@ -406,13 +399,11 @@ function claudeWindowShown(w) {
 }
 
 // /api/oauth/profile 의 organization_type → 플랜. Max 는 rate_limit_tier 로 5x/20x 를 구분한다.
-const CLAUDE_ORG_PLANS = { claude_max: "max", claude_pro: "pro", claude_team: "team", claude_enterprise: "enterprise" }
-
 function claudePlan(profile) {
   const org = profile && profile.organization
   if (!org || typeof org !== "object") return null
   if (typeof org.rate_limit_tier === "string" && /max_\d+x/.test(org.rate_limit_tier)) return org.rate_limit_tier
-  return CLAUDE_ORG_PLANS[org.organization_type] || null
+  return { claude_max: "max", claude_pro: "pro", claude_team: "team", claude_enterprise: "enterprise" }[org.organization_type] || null
 }
 
 // 플랜은 부가 정보라 실패해도 사용량 조회를 막지 않는다
@@ -982,8 +973,8 @@ function readJSON(name, fallback) {
 }
 
 const writeJSON = (name, data) => fm.writeString(devPath(name), JSON.stringify(data))
-const devAccounts = () => readJSON(DEV_ACCOUNTS_FILE, []).sort((a, b) => (a.order || 0) - (b.order || 0))
-const devSaveAccounts = (list) => writeJSON(DEV_ACCOUNTS_FILE, list)
+const devAccounts = () => readJSON("aiusage-device-accounts.json", []).sort((a, b) => (a.order || 0) - (b.order || 0))
+const devSaveAccounts = (list) => writeJSON("aiusage-device-accounts.json", list)
 // 사용량은 계정마다 파일을 나눠, 여러 위젯이 동시에 써도 서로 덮어쓰지 않게 한다
 const devSnapName = (id) => `aiusage-device-snap-${id}.json`
 const devGetSnap = (id) => readJSON(devSnapName(id), null)
@@ -1016,7 +1007,7 @@ const devLockName = (id) => `aiusage-device-lock-${id}`
 function devTryLock(id) {
   const p = devPath(devLockName(id))
   try {
-    if (fm.fileExists(p) && Date.now() - parseInt(fm.readString(p), 10) < DEV_LOCK_MS) return false
+    if (fm.fileExists(p) && Date.now() - parseInt(fm.readString(p), 10) < 30 * 1000) return false // 30초 넘은 잠금은 버려진 것
   } catch (e) {}
   const mine = `${Date.now()}:${randomToken(6)}`
   fm.writeString(p, mine)
@@ -1143,12 +1134,13 @@ async function deviceApi(method, path, body) {
       const all = /[?&]all=1/.test(path)
       const accounts = devAccounts().filter((a) => (all || a.enabled !== false)
         && (!only || only.includes(a.id.toLowerCase()) || only.includes(String(a.label).toLowerCase())))
-      const minAge = /[?&]refresh=1/.test(path) ? DEV_MIN_REFRESH_MS : DEV_AUTO_REFRESH_MS
+      // 10분 넘게 지난 계정만 다시 조회. '새로고침'(refresh=1)도 1분 안에 조회한 계정은 건너뛴다.
+      const minAge = /[?&]refresh=1/.test(path) ? 60 * 1000 : 10 * 60 * 1000
       await Promise.all(accounts.map((a) => devRefreshAccount(a, minAge)))
       const entries = accounts.map(devUsageEntry)
       // 가장 오래된 조회 시각을 '업데이트' 시각으로 보여준다
       const oldest = Math.min(...entries.map((e) => msOf(e.fetched_at) || Date.now()), Date.now())
-      return { generated_at: isoOf(oldest), poll_interval: DEV_AUTO_REFRESH_MS / 1000, accounts: entries }
+      return { generated_at: isoOf(oldest), poll_interval: 600, accounts: entries }
     }
     if (route === "GET /v1/providers") {
       return { providers: Object.entries(DEVICE_PROVIDERS).map(([id, p]) => {
@@ -1165,28 +1157,31 @@ async function deviceApi(method, path, body) {
       await devRefreshAccount(acc, 0)
       return devPublic(acc)
     }
+    // 로그인 진행 중인 세션(15분 유효)
+    const LOGINS = "aiusage-device-logins.json"
+    const expired = (v) => Date.now() - v.created > 15 * 60 * 1000
     if (route === "POST /v1/logins") {
       const p = devProvider(body.provider)
       if (body.account_id && devFind(body.account_id).provider !== body.provider) throw new ApiError(t("err.noAccount"), 404)
       const start = p.startLogin()
-      const logins = readJSON(DEV_LOGINS_FILE, {})
-      for (const [k, v] of Object.entries(logins)) if (Date.now() - v.created > DEV_LOGIN_TTL_MS) delete logins[k]
+      const logins = readJSON(LOGINS, {})
+      for (const [k, v] of Object.entries(logins)) if (expired(v)) delete logins[k]
       const loginId = randomToken(16)
       logins[loginId] = { provider: body.provider, label: body.label || null, account_id: body.account_id || null,
         pending: start.pending, created: Date.now() }
-      writeJSON(DEV_LOGINS_FILE, logins)
+      writeJSON(LOGINS, logins)
       return { login_id: loginId, provider: body.provider, authorize_url: start.authorize_url }
     }
     if ((m = route.match(/^POST \/v1\/logins\/([\w-]+)\/complete$/))) {
-      const logins = readJSON(DEV_LOGINS_FILE, {})
+      const logins = readJSON(LOGINS, {})
       const entry = logins[m[1]]
-      if (!entry || Date.now() - entry.created > DEV_LOGIN_TTL_MS)
+      if (!entry || expired(entry))
         throw new ApiError(t("err.loginExpired"), 404)
       const { code, state } = parseCallbackInput(body.input)
       checkState(entry.pending.state, state)
       const result = await devProvider(entry.provider).finishLogin(entry.pending, code)
       delete logins[m[1]]
-      writeJSON(DEV_LOGINS_FILE, logins)
+      writeJSON(LOGINS, logins)
       const acc = devUpsert(entry.provider, entry.account_id, entry.label, result)
       await devRefreshAccount(acc, 0)
       return devPublic(devFind(acc.id))
@@ -1265,11 +1260,11 @@ async function serverApi(cfg, method, path, body, timeout = 25) {
 
 // ───────────────────────── 캐시 ─────────────────────────
 // 마지막으로 받은 사용량. 연결이 안 될 때 이 값을 흐리게 보여준다.
-const readCache = () => readJSON(CACHE_FILE, null)
+const readCache = () => readJSON("aiusage-cache.json", null)
 
 function writeCache(data) {
   try {
-    writeJSON(CACHE_FILE, data)
+    writeJSON("aiusage-cache.json", data)
   } catch (e) {}
 }
 
@@ -1347,7 +1342,8 @@ function fmtDate(iso) {
 
 function fmtDay(iso) {
   const d = new Date(iso)
-  return t("date.md", { m: d.getMonth() + 1, d: d.getDate(), mon: MONTHS_EN[d.getMonth()] })
+  const mon = "Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split(" ")[d.getMonth()]
+  return t("date.md", { m: d.getMonth() + 1, d: d.getDate(), mon })
 }
 
 // "Claude (me@example.com)"
@@ -1377,11 +1373,9 @@ function planLabel(plan, provider) {
   return key.replace(/[_-]+/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())
 }
 
-const GROUP_SHORT = { "gemini models": "Gemini", "claude and gpt models": "Claude/GPT" }
-
 function groupShort(group) {
   if (group === "모델별" || group === "추가 한도") return localLabel(group) // 우리가 붙인 이름은 통째로(번역)
-  return GROUP_SHORT[group.toLowerCase()] || group.split(/\s+/)[0]
+  return { "gemini models": "Gemini", "claude and gpt models": "Claude/GPT" }[group.toLowerCase()] || group.split(/\s+/)[0]
 }
 
 // 그룹이 있으면 짧은 그룹 이름을 앞에 붙인다(예: Gemini 5시간).
@@ -1391,9 +1385,8 @@ function windowTitle(w) {
 }
 
 // 위젯에 보일 Antigravity 그룹(계정 id → 그룹 이름). 이 기기에만 저장한다.
-const KC_WIDGET_GROUPS = "aiusage.widgetGroups"
-const widgetGroups = () => kcJSON(KC_WIDGET_GROUPS, {})
-const setWidgetGroup = (id, group) => Keychain.set(KC_WIDGET_GROUPS, JSON.stringify({ ...widgetGroups(), [id]: group }))
+const widgetGroups = () => kcJSON("aiusage.widgetGroups", {})
+const setWidgetGroup = (id, group) => Keychain.set("aiusage.widgetGroups", JSON.stringify({ ...widgetGroups(), [id]: group }))
 const windowGroups = (acc) => [...new Set((acc.windows || []).map((w) => w.group).filter(Boolean))]
 
 // 위젯 그룹: 고른 것이 있으면 그것, 없으면 대표 창의 그룹(보통 Gemini)
@@ -1461,22 +1454,12 @@ function drawBar(ctx, x, y, width, height, pct, color, track) {
 }
 
 // ───────────────────────── 위젯 그리기 ─────────────────────────
-// 위젯 크기(pt). iOS 는 기기별로 고정 크기를 쓰므로 화면 폭으로 고른다. 모르는 기기는 비율로 근사.
-const WIDGET_SIZES = {
-  440: { small: 170, medium: 364 },
-  430: { small: 170, medium: 364 },
-  428: { small: 170, medium: 364 },
-  414: { small: 169, medium: 360 },
-  402: { small: 162, medium: 345 },
-  393: { small: 158, medium: 338 },
-  390: { small: 158, medium: 338 },
-  375: { small: 155, medium: 329 },
-}
-
+// 위젯 폭(pt). iOS 는 기기별로 고정 크기를 쓰므로 화면 폭으로 고른다. 모르는 기기는 비율로 근사.
 function widgetWidth(family) {
   const w = Math.round(Math.min(Device.screenSize().width, Device.screenSize().height))
-  const s = WIDGET_SIZES[w] || { small: Math.round(w * 0.4), medium: Math.round(w * 0.86) }
-  return family === "small" ? s.small : s.medium
+  const [small, medium] = { 440: [170, 364], 430: [170, 364], 428: [170, 364], 414: [169, 360], 402: [162, 345],
+    393: [158, 338], 390: [158, 338], 375: [155, 329] }[w] || [Math.round(w * 0.4), Math.round(w * 0.86)]
+  return family === "small" ? small : medium
 }
 
 const LAYOUT = {
@@ -1484,16 +1467,14 @@ const LAYOUT = {
   medium: { pad: 16, padV: 11, accounts: 2, gap: 9 },
   large: { pad: 16, padV: 14, accounts: 4, gap: 10 },
 }
-const CELL_GAP = 14
 
-const KC_CLAUDE_LOGO = "aiusage.claudeLogo"
 let _claudeLogo = null
 function claudeLogo() {
-  if (_claudeLogo == null) _claudeLogo = kcGet(KC_CLAUDE_LOGO, "default")
+  if (_claudeLogo == null) _claudeLogo = kcGet("aiusage.claudeLogo", "default")
   return _claudeLogo
 }
 function setClaudeLogo(v) {
-  Keychain.set(KC_CLAUDE_LOGO, v)
+  Keychain.set("aiusage.claudeLogo", v)
   _claudeLogo = v
 }
 
@@ -1619,9 +1600,10 @@ function accountBlock(parent, acc, family, inner, offline) {
   block.addSpacer(3)
   const row = block.addStack()
   row.layoutHorizontally()
-  const cellW = Math.floor((inner - CELL_GAP) / 2)
+  const gap = 14
+  const cellW = Math.floor((inner - gap) / 2)
   ws.forEach((w, i) => {
-    if (i > 0) row.addSpacer(CELL_GAP)
+    if (i > 0) row.addSpacer(gap)
     windowCell(row, w, cellW, dim)
   })
   return block
@@ -1755,24 +1737,20 @@ async function runWidget() {
       widget = emptyWidget(t("widget.loadFailed", { msg: e.message }))
     }
   }
-  widget.refreshAfterDate = new Date(Date.now() + WIDGET_REFRESH_MIN * 60 * 1000)
+  widget.refreshAfterDate = new Date(Date.now() + 15 * 60 * 1000) // iOS 가 정하지만 15분 뒤를 요청
   Script.setWidget(widget)
 }
 
 // ───────────────────────── 알림 ─────────────────────────
 // 위젯·앱이 사용량을 받을 때마다 확인해, 필요한 알림을 한 번씩만 보낸다.
 // 보낸 기록(sent)과 한도별 직전 값(seen)은 파일에 둔다. seen 으로 예정보다 이른 초기화를 알아챈다.
-const KC_NOTIFY = "aiusage.notify"
-const NOTIFY_STATE_FILE = "aiusage-notify-state.json"
-const NOTIFY_KEEP_MS = 14 * DAY_MS
-
 // 알림 종류. 이름·설명은 문구의 notify.<종류>.title / .desc
 const NOTIFY_TYPES = ["high", "reset", "early", "login", "credit"]
 
 function notifySettings() {
   const base = { enabled: true, threshold: 90, types: Object.fromEntries(NOTIFY_TYPES.map((type) => [type, true])) }
   try {
-    const saved = kcJSON(KC_NOTIFY, {})
+    const saved = kcJSON("aiusage.notify", {})
     return { ...base, ...saved, types: { ...base.types, ...(saved.types || {}) } }
   } catch (e) {
     return base
@@ -1780,7 +1758,7 @@ function notifySettings() {
 }
 
 function saveNotifySettings(settings) {
-  Keychain.set(KC_NOTIFY, JSON.stringify(settings))
+  Keychain.set("aiusage.notify", JSON.stringify(settings))
 }
 
 // at 이 있으면 그 시각에 예약. 같은 id 로 다시 예약하면 이전 예약을 대신한다.
@@ -1814,7 +1792,7 @@ async function checkAlerts(accounts) {
   const settings = notifySettings()
   const on = (type) => settings.enabled && settings.types[type]
   const now = Date.now()
-  const state = readJSON(NOTIFY_STATE_FILE, {})
+  const state = readJSON("aiusage-notify-state.json", {})
   // 예전 형식({키: 시각})도 보낸 기록으로 이어받는다
   const sent = state.sent || (state.seen ? {} : state)
   const seen = state.seen || {}
@@ -1858,9 +1836,10 @@ async function checkAlerts(accounts) {
           body: t("notify.credit.body", { t: fmtDuration(item.expires_at) }) })
     }
   }
-  for (const [key, at] of Object.entries(sent)) if (now - at > NOTIFY_KEEP_MS) delete sent[key]
-  for (const [key, v] of Object.entries(seen)) if (now - v.at > NOTIFY_KEEP_MS) delete seen[key]
-  writeJSON(NOTIFY_STATE_FILE, { sent, seen })
+  // 2주 지난 기록은 지운다
+  for (const [key, at] of Object.entries(sent)) if (now - at > 14 * DAY_MS) delete sent[key]
+  for (const [key, v] of Object.entries(seen)) if (now - v.at > 14 * DAY_MS) delete seen[key]
+  writeJSON("aiusage-notify-state.json", { sent, seen })
   try {
     if (cancel.length) await Notification.removePending(cancel)
   } catch (e) {}
@@ -1869,6 +1848,76 @@ async function checkAlerts(accounts) {
       await sendNotification(job)
     } catch (e) {} // 알림 권한이 없으면 조용히 넘어간다
   }
+}
+
+// ───────────────────────── 업데이트 ─────────────────────────
+// UPDATE_URL 에서 새 스크립트를 받아 이 스크립트 파일을 바꿔 쓴다. 바로 전 버전은 되돌릴 수 있게 남겨 둔다.
+// 확인 결과는 파일에 남겨 두고, 앱을 열 때 12시간마다 한 번 다시 확인한다(위젯에서는 확인하지 않는다).
+const scriptVersion = (src) => (String(src).match(/^const VERSION = "([^"]+)"/m) || [])[1] || null
+
+// a 가 b 보다 새 버전인가 ("0.10.0" > "0.9.1")
+function isNewer(a, b) {
+  const pa = String(a || "").split(".").map(Number)
+  const pb = String(b || "").split(".").map(Number)
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    if ((pa[i] || 0) !== (pb[i] || 0)) return (pa[i] || 0) > (pb[i] || 0)
+  }
+  return false
+}
+
+const updateState = () => readJSON("aiusage-update.json", {})
+
+async function fetchLatestScript() {
+  const res = await devHttp("GET", UPDATE_URL, { headers: { Accept: "*/*" }, timeout: 30 })
+  if (!res.ok) throw new Error(t("update.fetchFailed", { status: res.status }))
+  const version = scriptVersion(res.text)
+  if (!version) throw new Error(t("update.invalid"))
+  return { version, source: res.text }
+}
+
+async function checkUpdate(force = false) {
+  const state = updateState()
+  if (!force && Date.now() - (state.checked_at || 0) < 12 * 3600 * 1000) return state
+  const { version } = await fetchLatestScript()
+  const next = { checked_at: Date.now(), latest: version }
+  writeJSON("aiusage-update.json", next)
+  return next
+}
+
+// 스크립트 파일이 iCloud 에 있으면 iCloud 파일 관리자로 써야 한다
+function scriptFiles(path) {
+  try {
+    const cloud = FileManager.iCloud()
+    if (path.startsWith(cloud.documentsDirectory())) return cloud
+  } catch (e) {}
+  return FileManager.local()
+}
+
+// 되돌리기용으로 남겨 둔 바로 전 버전. .js 가 아니어야 스크립트 목록에 나타나지 않는다.
+const backupPath = () => devPath("aiusage-previous.txt")
+const backupVersion = () => (fm.fileExists(backupPath()) ? scriptVersion(fm.readString(backupPath())) : null)
+
+async function installUpdate() {
+  const { version, source } = await fetchLatestScript()
+  // 다운로드가 잘렸거나 다른 파일이면 설치하지 않는다(실행하지 않고 문법만 확인)
+  try {
+    new Function(`return (async () => {\n${source}\n})`)
+  } catch (e) {
+    throw new Error(t("update.invalid"))
+  }
+  const path = module.filename
+  const files = scriptFiles(path)
+  fm.writeString(backupPath(), files.readString(path))
+  files.writeString(path, source)
+  writeJSON("aiusage-update.json", { checked_at: Date.now(), latest: version })
+  return version
+}
+
+function restoreBackup() {
+  const source = fm.readString(backupPath())
+  scriptFiles(module.filename).writeString(module.filename, source)
+  fm.remove(backupPath())
+  return scriptVersion(source)
 }
 
 // ───────────────────────── 앱 UI: 공용 ─────────────────────────
@@ -2127,7 +2176,7 @@ const HEAD_STYLE = {
 }
 // 글자 크기가 달라도 밑줄(baseline)이 맞도록 y 를 잡았다.
 const LINE_STYLE = {
-  card: { title: [13, 400], titleY: 2, pct: 15, time: 12, timeY: 3, barY: 23, barH: 7 },
+  card: { title: [13, 400], titleY: 2, pct: 15, time: 12, timeY: 3, barY: 23, barH: 7, rowH: 42 },
   detail: { title: [15, 500], titleY: 2, pct: 18, time: 13, timeY: 4, barY: 30, barH: 8 },
 }
 
@@ -2231,8 +2280,6 @@ function drawWindowLine(ctx, w, y, width, dim, style) {
 }
 
 // 메인 화면의 계정 카드. 앱은 공간이 넓어 한도마다 한 줄씩(가로 전체) 모두 보여준다.
-const CARD_ROW_H = 42
-
 function accountCard(acc, enabled) {
   const p = pal()
   const W = cardWidth()
@@ -2240,12 +2287,12 @@ function accountCard(acc, enabled) {
   const head = HEAD_STYLE.card.height
   const line = LINE_STYLE.card
   // 마지막 줄은 막대 아래 여백 없이 끝낸다
-  const H = head + (ws.length ? (ws.length - 1) * CARD_ROW_H + line.barY + line.barH + 2 : 36)
+  const H = head + (ws.length ? (ws.length - 1) * line.rowH + line.barY + line.barH + 2 : 36)
   const ctx = newCtx(W, H)
   const dim = acc.stale || acc.status === "needs_login"
   drawAccountHead(ctx, acc, { plan: acc.plan, pills: statusPills(acc, { enabled }), dim }, W, "card")
   if (!ws.length) drawTextAt(ctx, acc.error || statusText(acc.status) || t("common.noData"), 0, head + 2, W, 32, Font.systemFont(13), p.sub)
-  ws.forEach((w, i) => drawWindowLine(ctx, w, head + i * CARD_ROW_H, W, dim, "card"))
+  ws.forEach((w, i) => drawWindowLine(ctx, w, head + i * line.rowH, W, dim, "card"))
   return { image: ctx.getImage(), height: H }
 }
 
@@ -2557,7 +2604,55 @@ async function settingsPage() {
         logoCache = {}
       })))
     }
-    page.add(noteRow(t("settings.version", { v: VERSION })))
+    const latest = updateState().latest
+    const fresh = isNewer(latest, VERSION)
+    page.add(headerRow(t("update.title")))
+    page.add(valueRow(t("settings.version", { v: VERSION }), fresh ? t("update.available", { v: latest }) : "›",
+      page.run(updatePage), { color: fresh ? ACCENT : null, valueWidth: fresh ? 40 : 12 }))
+  })
+}
+
+async function updatePage() {
+  let state = updateState()
+  let checking = true
+  let started = false
+  let installed = false
+  await openPage(t("update.title"), async (page) => {
+    // 들어오자마자 다시 확인하고, 끝나면 화면을 새로 그린다
+    if (!started) {
+      started = true
+      checkUpdate(true)
+        .then((next) => (state = next))
+        .catch((e) => (page.notice = { title: t("common.error"), detail: e.message, color: C.bad }))
+        .finally(() => {
+          checking = false
+          page.render()
+        })
+    }
+    page.add(valueRow(t("update.current"), VERSION))
+    page.add(valueRow(t("update.latest"), checking ? t("update.checking") : state.latest || "–", page.run(async () => {
+      state = await checkUpdate(true)
+    }), { subtitle: state.checked_at ? t("update.checkedAt", { ago: fmtAgo(isoOf(state.checked_at)) }) : null }))
+    if (installed) return
+    if (isNewer(state.latest, VERSION)) {
+      page.add(actionRow(t("update.install", { v: state.latest }), page.run(async () => {
+        const v = await installUpdate()
+        installed = true
+        page.ok(t("update.done", { v }), t("update.restart"))
+      }), ACCENT))
+    } else if (state.latest && !checking) {
+      page.add(textRow(t("update.upToDate"), null, { color: Color.gray() }))
+    }
+    const prev = backupVersion()
+    if (prev) {
+      page.add(actionRow(t("update.restore", { v: prev }), page.run(async () => {
+        if (!(await confirm(t("update.restore", { v: prev }), t("update.restoreConfirm")))) return
+        const v = restoreBackup()
+        installed = true
+        page.ok(t("update.restored", { v }), t("update.restart"))
+      })))
+    }
+    page.add(noteRow(t("update.note")))
   })
 }
 
@@ -2612,7 +2707,18 @@ async function widgetPreviewPage() {
 // ───────────────────────── 앱 UI: 메인 ─────────────────────────
 async function mainMenu() {
   let refresh = false
+  let checked = false
   await openPage(APP_TITLE, async (page) => {
+    // 새 버전 확인은 화면을 늦추지 않게 따로 돌리고, 새 버전이 있으면 다시 그린다
+    if (!checked) {
+      checked = true
+      checkUpdate()
+        .then((s) => isNewer(s.latest, VERSION) && page.render())
+        .catch(() => {})
+    }
+    const latest = updateState().latest
+    if (isNewer(latest, VERSION)) page.add(linkRow(t("update.banner", { v: latest }), page.run(updatePage)))
+
     if (!getConfig()) {
       page.add(noteRow(t("main.intro")))
       page.add(headerRow(t("main.start")))
@@ -2657,7 +2763,6 @@ async function mainMenu() {
 // ───────────────────────── 문구 (i18n) ─────────────────────────
 // 한국어 · English · 日本語 · 简体中文. 설정 → 언어에서 고르거나 기기 언어를 따른다(지원하지 않는 언어는 영어).
 // 서버가 내려주는 오류 문구는 서버 언어(한국어) 그대로다.
-const KC_LANG = "aiusage.lang" // "auto" | LANG_CODES
 const LANG_CODES = ["ko", "en", "ja", "zh"]
 const LANG_INFO = {
   ko: { name: "한국어", locale: "ko_KR", dateFormat: "M월 d일 (E) HH:mm" },
@@ -2665,10 +2770,9 @@ const LANG_INFO = {
   ja: { name: "日本語", locale: "ja_JP", dateFormat: "M月d日(E) HH:mm" },
   zh: { name: "简体中文", locale: "zh_CN", dateFormat: "M月d日 (E) HH:mm" },
 }
-const MONTHS_EN = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 
 function langSetting() {
-  return kcGet(KC_LANG, "auto")
+  return kcGet("aiusage.lang", "auto") // "auto" | LANG_CODES
 }
 
 function resolveLang(setting) {
@@ -2684,7 +2788,7 @@ function resolveLang(setting) {
 let LANG = resolveLang(langSetting())
 
 function setLang(setting) {
-  Keychain.set(KC_LANG, setting)
+  Keychain.set("aiusage.lang", setting)
   LANG = resolveLang(setting)
 }
 
@@ -2953,6 +3057,32 @@ const STRINGS = {
   "settings.language": ["언어", "Language", "言語", "语言"],
   "settings.version": ["버전 {v}", "Version {v}", "バージョン {v}", "版本 {v}"],
   "lang.auto": ["기기 설정 따르기", "Use device language", "端末の言語に合わせる", "跟随系统"],
+
+  // 업데이트
+  "update.title": ["업데이트", "Updates", "アップデート", "更新"],
+  "update.current": ["현재 버전", "Current version", "現在のバージョン", "当前版本"],
+  "update.latest": ["최신 버전", "Latest version", "最新バージョン", "最新版本"],
+  "update.checking": ["확인 중…", "Checking…", "確認中…", "正在检查…"],
+  "update.checkedAt": ["{ago} 확인 · 눌러서 다시 확인", "Checked {ago} · tap to check again", "確認: {ago} · タップで再確認", "{ago}检查 · 点按重新检查"],
+  "update.available": ["{v} 있음", "{v} available", "{v} あり", "有 {v}"],
+  "update.banner": ["새 버전이 나왔어요 ({v})", "Version {v} is available", "新しいバージョン {v} があります", "有新版本 {v}"],
+  "update.install": ["지금 업데이트 ({v})", "Update now ({v})", "今すぐアップデート ({v})", "立即更新（{v}）"],
+  "update.done": ["업데이트했어요 ({v})", "Updated to {v}", "{v} にアップデートしました", "已更新到 {v}"],
+  "update.restart": ["스크립트를 닫고 다시 실행하면 적용돼요.", "Close and run the script again to apply it.",
+    "スクリプトを閉じてもう一度実行すると反映されます。", "关闭并重新运行脚本即可生效。"],
+  "update.upToDate": ["최신 버전이에요", "You're up to date", "最新バージョンです", "已是最新版本"],
+  "update.restore": ["이전 버전으로 되돌리기 ({v})", "Restore previous version ({v})", "前のバージョンに戻す ({v})", "恢复上一版本（{v}）"],
+  "update.restoreConfirm": ["업데이트하기 전 버전으로 되돌릴까요?", "Go back to the version from before the update?",
+    "アップデート前のバージョンに戻しますか？", "要恢复到更新前的版本吗？"],
+  "update.restored": ["되돌렸어요 ({v})", "Restored {v}", "{v} に戻しました", "已恢复到 {v}"],
+  "update.note": ["새 버전은 GitHub에서 받아요. 받은 파일이 온전한 스크립트일 때만 바꾸고, 바로 전 버전은 되돌릴 수 있게 남겨 둬요. 앱을 열면 12시간마다 새 버전을 확인해요.",
+    "Updates are downloaded from GitHub. The script is replaced only if the download is a valid script, and the previous version is kept so you can go back. The app checks for a new version every 12 hours when opened.",
+    "新しいバージョンは GitHub から取得します。正しいスクリプトの場合だけ置き換え、直前のバージョンは戻せるように残します。アプリを開くと12時間ごとに確認します。",
+    "新版本从 GitHub 下载。只有下载的是完整脚本时才会替换，并保留上一版本以便恢复。打开应用时每 12 小时检查一次。"],
+  "update.fetchFailed": ["새 버전을 받지 못했어요 (HTTP {status})", "Couldn't download the update (HTTP {status})",
+    "アップデートをダウンロードできませんでした (HTTP {status})", "无法下载更新（HTTP {status}）"],
+  "update.invalid": ["받은 파일이 올바른 스크립트가 아니에요. 잠시 뒤 다시 시도해 주세요.", "The download isn't a valid script. Please try again later.",
+    "ダウンロードしたファイルが正しいスクリプトではありません。しばらくしてからもう一度お試しください。", "下载的文件不是有效的脚本。请稍后再试。"],
   "mode.device": ["이 iPhone에서 직접", "Directly on this iPhone", "この iPhone で直接", "直接在此 iPhone 上"],
   "mode.deviceDesc": ["서버 없이 이 스크립트가 로그인하고 조회해요.", "No server: this script signs in and fetches by itself.",
     "サーバーなしで、このスクリプトがログインと取得を行います。", "无需服务器，由此脚本登录并获取数据。"],

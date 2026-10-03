@@ -27,7 +27,7 @@ const URLScheme = { forRunningScript: () => "scriptable:///run/AIUsage" }
 
 // ── 가짜 업스트림 ──
 const calls = []
-const up = { claudeUsageStatus: 200, codexRefreshes: 0, claudeRefreshes: 0, claudeChallenge: null, codexChallenge: null }
+const up = { script: { status: 404, body: "" }, claudeUsageStatus: 200, codexRefreshes: 0, claudeRefreshes: 0, claudeChallenge: null, codexChallenge: null }
 const jwt = (o) => `h.${Buffer.from(JSON.stringify(o)).toString("base64url")}.s`
 const parseBody = (b, headers) => (!b ? {} : (headers["Content-Type"] || "").includes("json") ? JSON.parse(b) : Object.fromEntries(new URLSearchParams(b)))
 const s256 = (v) => crypto.createHash("sha256").update(v).digest("base64url")
@@ -104,6 +104,8 @@ function upstream(method, url, headers, raw) {
       { displayName: "Claude and GPT models", buckets: [{ id: "cw", displayName: "Weekly Limit Remaining", remainingFraction: 0.05 },
         { id: "c5", displayName: "Five Hour Limit Remaining", remainingFraction: 0.7 }] }] } })
   }
+  if (url === "https://raw.githubusercontent.com/tmmmzk/scriptable-ai-usage/main/scriptable/AIUsage.js")
+    return { status: up.script.status, body: up.script.body, headers: {} }
   throw new Error(`unexpected ${method} ${url}`)
 }
 
@@ -116,12 +118,14 @@ class Request {
   }
 }
 
-const env = { Keychain, FileManager, UUID, Color, Font, Request, Notification, URLScheme, Device: { screenSize: () => ({ width: 393, height: 852 }) } }
+const env = { Keychain, FileManager, UUID, Color, Font, Request, Notification, URLScheme, Device: { screenSize: () => ({ width: 393, height: 852 }) },
+  module: { filename: "/scripts/AIUsage.js" } }
 const api = new Function(...Object.keys(env), body + `
   return { sha256, b64url, b64decode, utf8Bytes, utf8Decode, jwtClaims, pkcePair, parseCallbackInput, deviceApi,
     devGetCreds, devCredKey, getConfig, setMode, KC_AG_CLIENT, msOf, devRefreshCreds, claudeProvider,
     checkAlerts, saveNotifySettings, planLabel, resetText, claudeWindows, cleanUsage,
-    setLang, t, fmtDuration, windowTitle, statusText, serverApi, STRINGS, LANG_CODES, primaryWindows, setWidgetGroup }`)(...Object.values(env))
+    setLang, t, fmtDuration, windowTitle, statusText, serverApi, STRINGS, LANG_CODES, primaryWindows, setWidgetGroup,
+    isNewer, checkUpdate, installUpdate, restoreBackup, backupVersion, VERSION }`)(...Object.values(env))
 
 let passed = 0
 const test = async (name, fn) => { await fn(); passed++; console.log("ok -", name) }
@@ -454,6 +458,32 @@ await test("서버 모드: 프록시가 HTML 오류 페이지를 줘도 상태 �
   } finally {
     Request.prototype.loadString = realLoad
   }
+})
+
+await test("업데이트: 새 버전 확인(12시간 캐시) → 설치·백업 → 되돌리기, 깨진 파일은 설치하지 않음", async () => {
+  assert.ok(api.isNewer("0.10.0", "0.9.1") && api.isNewer("1.0", "0.9.9") && !api.isNewer("0.5.0", "0.5.0") && !api.isNewer(null, "0.1.0"))
+  const old = 'const VERSION = "0.0.1"\n// old'
+  files["/scripts/AIUsage.js"] = old
+  const fresh = SRC.replace(/^const VERSION = "[^"]+"/m, 'const VERSION = "9.9.9"')
+  up.script = { status: 200, body: fresh }
+  assert.equal((await api.checkUpdate()).latest, "9.9.9")
+  up.script = { status: 500, body: "" }
+  assert.equal((await api.checkUpdate()).latest, "9.9.9") // 12시간 안에는 다시 받지 않는다
+  await assert.rejects(api.checkUpdate(true), /HTTP 500/)
+  // 잘린 다운로드는 설치하지 않는다
+  up.script = { status: 200, body: fresh.slice(0, 20000) }
+  await assert.rejects(api.installUpdate(), (e) => e.message === api.t("update.invalid"))
+  assert.equal(files["/scripts/AIUsage.js"], old)
+  up.script = { status: 200, body: "<html>not a script</html>" }
+  await assert.rejects(api.installUpdate(), (e) => e.message === api.t("update.invalid"))
+  // 설치: 파일을 바꾸고 바로 전 버전은 남긴다
+  up.script = { status: 200, body: fresh }
+  assert.equal(await api.installUpdate(), "9.9.9")
+  assert.equal(files["/scripts/AIUsage.js"], fresh)
+  assert.equal(api.backupVersion(), "0.0.1")
+  assert.equal(api.restoreBackup(), "0.0.1")
+  assert.equal(files["/scripts/AIUsage.js"], old)
+  assert.equal(api.backupVersion(), null)
 })
 
 // ── 3. 위젯이 기기 모드에서 그려지는지 (전체 스크립트 실행) ──
