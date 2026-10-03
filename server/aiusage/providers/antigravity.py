@@ -26,6 +26,9 @@ SCOPES = [
     "https://www.googleapis.com/auth/userinfo.email",
 ]
 API_BASE = "https://cloudcode-pa.googleapis.com/v1internal"
+# 사용량은 요청을 처리한 배포에만 잡히고, 다른 배포는 안 쓴 것처럼(100% 남음) 답한다.
+# Antigravity 는 daily 배포를 주로 쓰므로 요약은 두 곳에 묻고 창마다 더 많이 쓴 쪽을 고른다.
+SUMMARY_BASES = ("https://daily-cloudcode-pa.googleapis.com/v1internal", API_BASE)
 USER_AGENT = "antigravity/hub/2.9.1 linux/amd64"
 CLIENT_METADATA = {"ideType": "ANTIGRAVITY", "platform": "PLATFORM_UNSPECIFIED", "pluginType": "GEMINI"}
 REFRESH_MARGIN = 120
@@ -136,10 +139,10 @@ class AntigravityProvider(Provider):
         save_creds(creds)
         return creds
 
-    def _post(self, method: str, token: str, body: dict) -> Any:
+    def _post(self, method: str, token: str, body: dict, base: str = API_BASE) -> Any:
         resp = http.request(
             "POST",
-            f"{API_BASE}:{method}",
+            f"{base}:{method}",
             headers={"Authorization": f"Bearer {token}", "User-Agent": USER_AGENT},
             json_body=body,
         )
@@ -189,7 +192,7 @@ class AntigravityProvider(Provider):
         body = {"project": project} if project else {}
         usage = Usage(plan=plan, email=jwt_claims(creds.get("id_token")).get("email"))
         try:
-            usage.windows = parse_quota_summary(self._post("retrieveUserQuotaSummary", token, body))
+            usage.windows = self._quota_summary(token, body)
         except ProviderError as exc:
             usage.warnings.append(f"요약 조회 실패, 모델별 조회로 대체: {exc}")
         if not usage.windows:
@@ -201,7 +204,34 @@ class AntigravityProvider(Provider):
         return usage
 
 
+    def _quota_summary(self, token: str, body: dict) -> list[dict]:
+        found, error = [], None
+        for base in SUMMARY_BASES:
+            try:
+                found.append(parse_quota_summary(self._post("retrieveUserQuotaSummary", token, body, base)))
+            except AuthError:
+                raise
+            except ProviderError as exc:
+                error = exc
+        if not found:
+            raise error
+        return merge_most_used(found)
+
+
 # ---------- 정규화(순수 함수, 테스트 대상) ----------
+def merge_most_used(lists: list[list[dict]]) -> list[dict]:
+    """같은 창(key)이 여러 응답에 있으면 사용률이 가장 높은 쪽을 쓴다(초기화 시각도 그쪽 것)."""
+    def used(w: dict) -> float:
+        return -1 if w["used_percent"] is None else w["used_percent"]
+
+    best: dict[str, dict] = {}
+    for windows in lists:
+        for w in windows:
+            if w["key"] not in best or used(w) > used(best[w["key"]]):
+                best[w["key"]] = w
+    keys = list(dict.fromkeys(w["key"] for windows in lists for w in windows))
+    return [best[k] for k in keys]
+
 def project_ref(value: Any) -> Optional[str]:
     if isinstance(value, str) and value.strip():
         return value.strip()

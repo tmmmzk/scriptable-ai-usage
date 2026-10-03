@@ -104,14 +104,24 @@ function upstream(method, url, headers, raw) {
   }
   if (url === "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist")
     return ok({ cloudaicompanionProject: { id: "proj-1" }, currentTier: { id: "free-tier" }, paidTier: { id: "g1-pro-tier", name: "Gemini Code Assist in Google One AI Pro" } })
-  if (url === "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary") {
+  // 사용량은 쓴 배포에만 잡히고 다른 배포는 100% 남음으로 답한다: 여기서는 Gemini 는 prod, Claude/GPT 는 daily
+  const agSummary = { "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary": "prod",
+    "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary": "daily" }[url]
+  if (agSummary) {
     assert.equal(b.project, "proj-1")
+    if (agSummary === "daily" && up.agDaily === "down") return ok({ error: "not found" }, 404)
+    const real = (env) => env === agSummary || (agSummary === "prod" && up.agDaily === "down")
+    const unused = { remainingFraction: 1, resetTime: "2099-06-01T00:00:00Z" }
     return ok({ response: { groups: [
       // 실제 응답처럼 이름은 영어로 길게, 주간이 먼저
-      { displayName: "Gemini Models", buckets: [{ bucketId: "gw", displayName: "Weekly Limit Remaining", remaining: { case: "remainingFraction", value: 0.9 } },
-        { bucketId: "g5", displayName: "Five Hour Limit Remaining", remainingFraction: 0.4, window: "ROLLING", resetTime: "2099-01-01T00:00:00Z" }] },
-      { displayName: "Claude and GPT models", buckets: [{ id: "cw", displayName: "Weekly Limit Remaining", remainingFraction: 0.05 },
-        { id: "c5", displayName: "Five Hour Limit Remaining", remainingFraction: 0.7, window: "18000s" }] }] } })
+      { displayName: "Gemini Models", buckets: real("prod")
+        ? [{ bucketId: "gw", displayName: "Weekly Limit Remaining", remaining: { case: "remainingFraction", value: 0.9 } },
+          { bucketId: "g5", displayName: "Five Hour Limit Remaining", remainingFraction: 0.4, window: "ROLLING", resetTime: "2099-01-01T00:00:00Z" }]
+        : [{ bucketId: "gw", displayName: "Weekly Limit Remaining", ...unused }, { bucketId: "g5", displayName: "Five Hour Limit Remaining", ...unused }] },
+      { displayName: "Claude and GPT models", buckets: real("daily")
+        ? [{ id: "cw", displayName: "Weekly Limit Remaining", remainingFraction: 0.05 },
+          { id: "c5", displayName: "Five Hour Limit Remaining", remainingFraction: 0.7, window: "18000s", resetTime: "2099-01-01T02:00:00Z" }]
+        : [{ id: "cw", displayName: "Weekly Limit Remaining", ...unused }, { id: "c5", displayName: "Five Hour Limit Remaining", ...unused }] }] } })
   }
   if (url === "https://raw.githubusercontent.com/tmmmzk/scriptable-ai-usage/main/scriptable/AIUsage.js")
     return { status: up.script.status, body: up.script.body, headers: {} }
@@ -348,6 +358,14 @@ await test("Antigravity: Client 설정 → 로그인 → 프로젝트·그룹별
   assert.deepEqual(api.primaryWindows(entry).map(api.windowTitle), ["Gemini 5시간", "Gemini 주간"])
   api.setWidgetGroup(acc.id, "Claude and GPT models")
   assert.deepEqual(api.primaryWindows(entry).map(api.windowTitle), ["Claude/GPT 5시간", "Claude/GPT 주간"])
+  // daily·prod 중 쓴 쪽의 초기화 시각을 쓴다
+  assert.equal(usage.windows[2].resets_at, "2099-01-01T02:00:00Z")
+  // daily 가 안 되면 prod 만으로
+  up.agDaily = "down"
+  const only = await call("POST", `/v1/accounts/${acc.id}/refresh`)
+  assert.deepEqual(only.windows.map((w) => w.used_percent), [60, 10, 30, 95])
+  assert.deepEqual(only.warnings, [])
+  up.agDaily = null
 })
 
 await test("숨김·이름 변경·삭제(키체인·파일 정리)", async () => {

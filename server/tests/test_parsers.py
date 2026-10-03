@@ -176,6 +176,21 @@ class AntigravityParserTest(unittest.TestCase):
         # 대표 창은 사용률과 상관없이 첫 그룹의 5시간·주간 (Claude/GPT 주간이 90% 여도)
         self.assertEqual([w["primary"] for w in ws], [True, True, False, False, False])
 
+    def test_summary_from_both_deployments(self):
+        # 사용량은 쓴 배포(daily/prod)에만 잡히고 다른 쪽은 100% 남음 → 창마다 더 많이 쓴 쪽
+        def summary(gemini, claude, claude_reset=None):
+            return antigravity.parse_quota_summary({"response": {"groups": [
+                {"displayName": "Gemini Models", "buckets": [{"bucketId": "g5", "displayName": "Five Hour Limit", "remainingFraction": gemini}]},
+                {"displayName": "Claude and GPT models", "buckets": [
+                    {"bucketId": "3p-5h", "displayName": "Five Hour Limit", "remainingFraction": claude, "resetTime": claude_reset}]},
+            ]}})
+        daily = summary(1.0, 0.0, "2026-10-03T06:19:00Z")
+        prod = summary(0.79, 1.0, "2026-10-03T07:00:00Z")
+        ws = antigravity.merge_most_used([daily, prod])
+        self.assertEqual([(w["group"], w["used_percent"]) for w in ws], [("Gemini Models", 21.0), ("Claude and GPT models", 100.0)])
+        self.assertEqual(ws[1]["resets_at"], "2026-10-03T06:19:00Z")
+        self.assertEqual(antigravity.merge_most_used([prod]), prod)
+
     def test_plan(self):
         # Google AI Pro 는 currentTier 가 free/standard 여도 paidTier 로 알 수 있다
         self.assertEqual(antigravity.resolve_plan({"currentTier": {"id": "free-tier"}, "paidTier": {"id": "g1-pro-tier"}}, {}), "g1-pro-tier")

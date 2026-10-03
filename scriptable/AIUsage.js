@@ -9,7 +9,7 @@
 // • 앱에서 실행하면 설정·계정 관리 화면이 열립니다.
 // • 위젯 Parameter 에 계정 이름(또는 id)을 쉼표로 적으면 그 계정만 표시합니다. 예) 개인,회사
 
-const VERSION = "0.7.2"
+const VERSION = "0.7.3"
 // 앱의 '업데이트'가 새 버전을 받아오는 주소(공개 저장소의 raw 파일). 포크했다면 여기를 바꾸세요.
 const UPDATE_URL = "https://raw.githubusercontent.com/tmmmzk/scriptable-ai-usage/main/scriptable/AIUsage.js"
 const KC_SERVER = "aiusage.server"
@@ -787,6 +787,9 @@ const AG = {
   userinfoUrl: "https://www.googleapis.com/oauth2/v2/userinfo",
   scopes: ["https://www.googleapis.com/auth/cloud-platform", "https://www.googleapis.com/auth/userinfo.email"],
   apiBase: "https://cloudcode-pa.googleapis.com/v1internal",
+  // 사용량은 요청을 처리한 배포에만 잡히고, 다른 배포는 안 쓴 것처럼(100% 남음) 답한다.
+  // Antigravity 는 daily 배포를 주로 쓰므로 요약은 두 곳에 묻고 창마다 더 많이 쓴 쪽을 고른다.
+  summaryBases: ["https://daily-cloudcode-pa.googleapis.com/v1internal", "https://cloudcode-pa.googleapis.com/v1internal"],
   redirectUri: "http://127.0.0.1:8585/callback",
   userAgent: "antigravity/hub/2.9.1 darwin/arm64",
   metadata: { ideType: "ANTIGRAVITY", platform: "PLATFORM_UNSPECIFIED", pluginType: "GEMINI" },
@@ -901,8 +904,28 @@ function agOrder(windows) {
   return out
 }
 
-async function agPost(method, token, body) {
-  const res = await devHttp("POST", `${AG.apiBase}:${method}`, { json: body,
+// 같은 창(key)이 여러 응답에 있으면 사용률이 가장 높은 쪽을 쓴다(초기화 시각도 그쪽 것)
+function agMergeMostUsed(lists) {
+  const best = new Map()
+  for (const w of lists.flat()) {
+    const cur = best.get(w.key)
+    if (!cur || (w.used_percent ?? -1) > (cur.used_percent ?? -1)) best.set(w.key, w)
+  }
+  return [...best.values()]
+}
+
+async function agQuotaSummaryAll(token, body) {
+  const results = await Promise.allSettled(AG.summaryBases.map((base) => agPost("retrieveUserQuotaSummary", token, body, base)))
+  const failed = results.filter((r) => r.status === "rejected").map((r) => r.reason)
+  const auth = failed.find((e) => e.kind === "needs_login")
+  if (auth) throw auth
+  const found = results.filter((r) => r.status === "fulfilled").map((r) => agQuotaSummary(r.value))
+  if (!found.length) throw failed[failed.length - 1]
+  return agMergeMostUsed(found)
+}
+
+async function agPost(method, token, body, base = AG.apiBase) {
+  const res = await devHttp("POST", `${base}:${method}`, { json: body,
     headers: { Authorization: `Bearer ${token}`, "User-Agent": AG.userAgent } })
   if (res.status === 401) throw authError(t("err.agAuth"))
   if (res.status === 403) throw new ProviderError(t("err.forbidden", { method, text: res.text.slice(0, 160) }))
@@ -990,7 +1013,7 @@ const antigravityProvider = {
     const usage = { windows: [], reset_credits: null, extra: {}, warnings: [], plan: ca.plan,
       email: jwtClaims(creds.id_token).email || null }
     try {
-      usage.windows = agQuotaSummary(await agPost("retrieveUserQuotaSummary", creds.access_token, body))
+      usage.windows = await agQuotaSummaryAll(creds.access_token, body)
     } catch (e) {
       usage.warnings.push(t("warn.summaryFallback", { msg: e.message }))
     }
