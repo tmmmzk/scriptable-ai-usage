@@ -58,12 +58,14 @@ class UsageService:
 
     def usage_entry(self, acc: dict) -> dict:
         snap = self.store.get_snapshot(acc["id"]) or {}
+        provider = providers.get(acc["provider"])
+        windows = snap.get("windows", [])
         return {
             **self._common(acc, snap),
             "plan": snap.get("plan") or acc.get("plan"),
             "warnings": snap.get("warnings", []),
             "stale": snap.get("stale", False),
-            "windows": snap.get("windows", []),
+            "windows": provider.visible_windows(windows) if provider else windows,
             "reset_credits": snap.get("reset_credits"),
             "extra": snap.get("extra", {}),
         }

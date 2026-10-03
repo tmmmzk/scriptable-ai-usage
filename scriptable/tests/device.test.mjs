@@ -118,7 +118,7 @@ const env = { Keychain, FileManager, UUID, Color, Font, Request, Notification, U
 const api = new Function(...Object.keys(env), body + `
   return { sha256, b64url, b64decode, utf8Bytes, utf8Decode, jwtClaims, pkcePair, parseCallbackInput, deviceApi,
     devGetCreds, devCredKey, getConfig, setMode, KC_AG_CLIENT, msOf, devRefreshCreds, claudeProvider,
-    checkAlerts, saveNotifySettings, planLabel, resetText }`)(...Object.values(env))
+    checkAlerts, saveNotifySettings, planLabel, resetText, claudeWindows, cleanUsage }`)(...Object.values(env))
 
 let passed = 0
 const test = async (name, fn) => { await fn(); passed++; console.log("ok -", name) }
@@ -302,6 +302,26 @@ await test("플랜 표시: Codex Team 은 Business, Claude Max 는 5x/20x", () =
   assert.equal(api.planLabel("default_claude_max_20x", "claude"), "Max 20x")
   assert.equal(api.planLabel("plus", "codex"), "Plus")
   assert.equal(api.resetText(new Date(Date.now() - 60e3).toISOString()), "곧 초기화")
+})
+
+await test("Claude: 코드네임 블록·모델 행은 숨기고, 예전에 저장된 창도 거른다", () => {
+  const ws = api.claudeWindows({
+    five_hour: { utilization: 42, resets_at: "2026-10-03T03:00:00Z" },
+    seven_day_sonnet: { utilization: 5, resets_at: null },
+    iguana_necktie: { utilization: 1, resets_at: "2026-10-08T00:00:00Z" },
+    limits: [
+      { kind: "weekly_scoped", scope: { model: { display_name: "Fable 5.1" } }, percent: 33, resets_at: 1790000000 },
+      { kind: "weekly_scoped", scope: { model: { display_name: "Iguana Necktie" } }, percent: 7 },
+      { kind: "weekly_scoped", scope: { model: { display_name: "Sonnet" } }, percent: 5 },
+    ],
+  })
+  assert.deepEqual(ws.map((w) => w.label), ["현재 세션", "Sonnet 이번 주", "Fable 5.1 이번 주"])
+  const data = api.cleanUsage({ accounts: [
+    { provider: "claude", windows: [{ key: "session" }, { key: "iguana_necktie" }, { key: "model:Iguana Necktie" }, { key: "model:Fable" }] },
+    { provider: "codex", windows: [{ key: "session" }, { key: "additional:gpt_5_codex_spark:5h" }] },
+  ] })
+  assert.deepEqual(data.accounts.map((a) => a.windows.map((w) => w.key)),
+    [["session", "model:Fable"], ["session", "additional:gpt_5_codex_spark:5h"]])
 })
 
 await test("알림: 기준 초과·초기화 예약·재로그인·초기화권 만료 임박, 같은 알림은 한 번만", async () => {

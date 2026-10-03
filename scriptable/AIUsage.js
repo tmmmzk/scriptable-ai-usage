@@ -376,6 +376,17 @@ const CLAUDE_WINDOWS = [
   ["seven_day_sonnet", "weekly_sonnet", "Sonnet 이번 주", 7 * 86400, false],
 ]
 
+// limits[] 의 모델별 주간 한도도 알려진 모델만 보여준다. Claude Code 는 허용 목록(기본 Fable)으로
+// 거르고, 목록에 없는 행에는 코드네임 모델이 섞여 온다. 새 버전(예: Fable 6)은 계열 이름으로 통과시킨다.
+const CLAUDE_MODEL_FAMILIES = /^(fable|opus|sonnet|haiku)\b/i
+const claudeModelShown = (name) => typeof name === "string" && CLAUDE_MODEL_FAMILIES.test(name.trim())
+
+// 저장된 창 중 보여줄 것. 예전 버전이 저장한 코드네임 창(iguana_necktie 등)도 여기서 걸러진다.
+function claudeWindowShown(w) {
+  const key = String((w && w.key) || "")
+  return CLAUDE_WINDOWS.some(([, k]) => k === key) || (key.startsWith("model:") && claudeModelShown(key.slice(6)))
+}
+
 // /api/oauth/profile 의 organization_type → 플랜. Max 는 rate_limit_tier 로 5x/20x 를 구분한다.
 const CLAUDE_ORG_PLANS = { claude_max: "max", claude_pro: "pro", claude_team: "team", claude_enterprise: "enterprise" }
 
@@ -405,8 +416,10 @@ function claudeWindows(data) {
   }
   // 모델별 주간 한도(예: Fable). limits[] 중 kind 가 weekly_scoped 인 것.
   for (const item of Array.isArray(data.limits) ? data.limits : []) {
-    const model = item && item.kind === "weekly_scoped" && ((item.scope || {}).model || {}).display_name
-    if (typeof model !== "string" || !model.trim()) continue
+    const name = item && item.kind === "weekly_scoped" && ((item.scope || {}).model || {}).display_name
+    if (!claudeModelShown(name)) continue
+    const model = name.trim()
+    if (out.some((w) => w.label === `${model} 이번 주`)) continue // seven_day_opus 등과 겹치면 하나만
     const resets = typeof item.resets_at === "number" ? isoOf(item.resets_at * 1000) : isoOf(msOf(item.resets_at))
     out.push(makeWindow(`model:${model}`, `${model} 이번 주`, clampPct(num(item.percent)), resets, { seconds: 7 * 86400 }))
   }
@@ -1252,12 +1265,23 @@ async function loadUsage(refresh = false) {
   try {
     const data = await api("GET", `/v1/usage${refresh ? "?refresh=1" : ""}`, undefined, refresh ? 40 : 15)
     writeCache(data)
-    return { data, offline: false }
+    return { data: cleanUsage(data), offline: false }
   } catch (e) {
     const cached = readCache()
-    if (cached) return { data: cached, offline: true, error: e.message }
+    if (cached) return { data: cleanUsage(cached), offline: true, error: e.message }
     throw e
   }
+}
+
+// 서버·캐시가 예전 버전에서 저장한 값이어도 보여줄 창만 남긴다
+function visibleWindows(entry) {
+  const ws = entry.windows || []
+  return entry.provider === "claude" ? ws.filter(claudeWindowShown) : ws
+}
+
+function cleanUsage(data) {
+  for (const a of data.accounts || []) a.windows = visibleWindows(a)
+  return data
 }
 
 // ───────────────────────── 포맷 ─────────────────────────
@@ -2393,6 +2417,7 @@ async function accountDetail(accountId) {
   await openPage(null, async (page) => {
     if (deleted) return
     const { account: acc, usage } = await api("GET", `/v1/accounts/${accountId}`)
+    usage.windows = visibleWindows({ ...usage, provider: acc.provider })
     const patch = (body, timeout) => api("PATCH", `/v1/accounts/${accountId}`, body, timeout)
 
     await measureTexts(measureItemsFor(acc, usage, 22, 700, "detail"))

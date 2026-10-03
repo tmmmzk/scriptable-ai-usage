@@ -138,3 +138,7 @@ class Provider:
     def describe_creds(self, creds: dict) -> dict[str, Any]:
         """계정 목록 API에 노출해도 되는 자격증명 요약(비밀값 제외)."""
         return {}
+
+    def visible_windows(self, windows: list[dict]) -> list[dict]:
+        """저장된 사용량 창 중 보여줄 것. 예전 버전이 저장한 값을 거를 때 쓴다."""
+        return windows

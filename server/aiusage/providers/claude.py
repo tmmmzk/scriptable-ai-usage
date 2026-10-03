@@ -60,6 +60,21 @@ KNOWN_WINDOWS = [
     ("seven_day_opus", "weekly_opus", "Opus 이번 주", 7 * 86400, False),
     ("seven_day_sonnet", "weekly_sonnet", "Sonnet 이번 주", 7 * 86400, False),
 ]
+# limits[] 의 모델별 주간 한도도 알려진 모델만 보여준다. Claude Code 는 허용 목록(기본 Fable)으로
+# 거르고, 목록에 없는 행에는 코드네임 모델이 섞여 온다. 새 버전(예: Fable 6)은 계열 이름으로 통과시킨다.
+MODEL_FAMILIES = re.compile(r"^(fable|opus|sonnet|haiku)\b", re.I)
+KNOWN_KEYS = {key for _, key, _, _, _ in KNOWN_WINDOWS}
+
+
+def model_shown(name: Any) -> bool:
+    return isinstance(name, str) and bool(MODEL_FAMILIES.match(name.strip()))
+
+
+def window_shown(window: dict) -> bool:
+    key = str(window.get("key") or "")
+    return key in KNOWN_KEYS or (key.startswith("model:") and model_shown(key[len("model:"):]))
+
+
 # /api/oauth/profile 의 organization_type → 플랜
 ORG_PLANS = {"claude_max": "max", "claude_pro": "pro", "claude_team": "team", "claude_enterprise": "enterprise"}
 MAX_RESET_CREDITS = 50
@@ -134,6 +149,9 @@ class ClaudeProvider(Provider):
             "session_key": bool(creds.get("session_key")),
             "reset_credits_supported": bool(creds.get("session_key")),
         }
+
+    def visible_windows(self, windows: list[dict]) -> list[dict]:
+        return [w for w in windows if isinstance(w, dict) and window_shown(w)]
 
     # ---------- 토큰 ----------
     @staticmethod
@@ -312,8 +330,11 @@ def parse_windows(data: dict) -> list[dict]:
         if not isinstance(item, dict) or item.get("kind") != "weekly_scoped":
             continue
         model = ((item.get("scope") or {}).get("model") or {}).get("display_name")
-        if not isinstance(model, str) or not model.strip():
+        if not model_shown(model):
             continue
+        model = model.strip()
+        if any(w["label"] == f"{model} 이번 주" for w in windows):
+            continue  # seven_day_opus 등과 겹치면 하나만
         resets = item.get("resets_at")
         windows.append(
             make_window(

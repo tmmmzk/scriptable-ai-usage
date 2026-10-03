@@ -18,6 +18,9 @@ class ClaudeParserTest(unittest.TestCase):
             "iguana_necktie": {"utilization": 1, "resets_at": "2026-10-08T00:00:00Z"},
             "limits": [
                 {"kind": "weekly_scoped", "scope": {"model": {"display_name": "Fable"}}, "percent": 33, "resets_at": 1790000000},
+                {"kind": "weekly_scoped", "scope": {"model": {"display_name": "Iguana Necktie"}}, "percent": 7},
+                {"kind": "weekly_scoped", "scope": {"model": {"display_name": "iguana_necktie"}}, "percent": 7},
+                {"kind": "weekly_scoped", "scope": {"model": {"display_name": "Sonnet"}}, "percent": 5},
                 {"kind": "other", "scope": {"model": {"display_name": "X"}}, "percent": 1},
             ],
             "extra_usage": {"is_enabled": True, "used_credits": 120, "monthly_limit": 5000, "utilization": 2.4},
@@ -35,7 +38,16 @@ class ClaudeParserTest(unittest.TestCase):
         self.assertEqual(w["model:Fable"]["label"], "Fable 이번 주")
         self.assertEqual(w["model:Fable"]["used_percent"], 33)
         self.assertNotIn("model:X", w)
+        # 모델별 한도도 알려진 모델 계열만. seven_day_sonnet 과 겹치는 Sonnet 행은 하나만.
+        self.assertEqual(sorted(w), ["model:Fable", "session", "weekly", "weekly_sonnet"])
         self.assertEqual(claude.parse_extra_usage(data)["extra_usage"]["used_percent"], 2.4)
+
+    def test_visible_windows_drops_old_codename_windows(self):
+        # 예전 버전이 저장한 스냅숏(모르는 키를 그대로 보여주던 시절)도 응답에서 걸러진다
+        stored = [{"key": "session"}, {"key": "iguana_necktie"}, {"key": "model:Fable 5.1"},
+                  {"key": "model:Iguana Necktie"}, {"key": "weekly_opus"}]
+        keys = [x["key"] for x in claude.ClaudeProvider().visible_windows(stored)]
+        self.assertEqual(keys, ["session", "model:Fable 5.1", "weekly_opus"])
 
     def test_plan(self):
         self.assertEqual(claude.parse_plan({"organization": {"organization_type": "claude_max",

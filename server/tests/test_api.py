@@ -180,6 +180,13 @@ class ApiTest(unittest.TestCase):
         for secret in ("c-rt-2", "c-at-2", "sk-ant-sid-test"):
             self.assertNotIn(secret, raw)
 
+        # 예전 버전이 저장한 코드네임 창은 응답에서 빠진다(조회가 계속 실패해 스냅숏이 그대로여도)
+        snap = self.svc.store.get_snapshot(acc["id"])
+        snap["windows"] = snap["windows"] + [{"key": "iguana_necktie", "label": "iguana necktie", "used_percent": 1}]
+        self.svc.store.put_snapshot(acc["id"], snap)
+        status, usage = self.call("GET", "/v1/usage")
+        self.assertNotIn("iguana_necktie", [w["key"] for w in usage["accounts"][0]["windows"]])
+
     def test_codex_flow_and_rotation(self):
         status, start = self.call("POST", "/v1/logins", {"provider": "codex"})
         state = urllib.parse.parse_qs(urllib.parse.urlparse(start["authorize_url"]).query)["state"][0]
