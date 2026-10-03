@@ -40,7 +40,7 @@ class ClaudeParserTest(unittest.TestCase):
         self.assertNotIn("model:X", w)
         # 모델별 한도도 알려진 모델 계열만. seven_day_sonnet 과 겹치는 Sonnet 행은 하나만.
         self.assertEqual(sorted(w), ["model:Fable", "session", "weekly", "weekly_sonnet"])
-        self.assertEqual(claude.parse_extra_usage(data)["extra_usage"]["used_percent"], 2.4)
+        self.assertEqual(claude.parse_extra_usage(data)["extra_usage"], {"used": 1.2, "limit": 50.0, "used_percent": 2.4, "currency": "USD"})
 
     def test_visible_windows_drops_old_codename_windows(self):
         # 예전 버전이 저장한 스냅숏(모르는 키를 그대로 보여주던 시절)도 응답에서 걸러진다

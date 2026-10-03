@@ -372,8 +372,7 @@ const CLAUDE = {
   tokenUrl: "https://platform.claude.com/v1/oauth/token",
   redirectUri: "https://platform.claude.com/oauth/code/callback",
   scopes: ["org:create_api_key", "user:profile", "user:inference", "user:sessions:claude_code", "user:mcp_servers", "user:file_upload"],
-  usageUrl: "https://api.anthropic.com/api/oauth/usage",
-  profileUrl: "https://api.anthropic.com/api/oauth/profile",
+  apiBase: "https://api.anthropic.com/api/oauth",
   webBase: "https://claude.ai/api",
   userAgent: "claude-code/2.1.0",
   webUserAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1",
@@ -395,7 +394,7 @@ const claudeModelShown = (name) => typeof name === "string" && /^(fable|opus|son
 // 저장된 창 중 보여줄 것. 예전 버전이 저장한 코드네임 창(iguana_necktie 등)도 여기서 걸러진다.
 function claudeWindowShown(w) {
   const key = String((w && w.key) || "")
-  return CLAUDE_WINDOWS.some(([, k]) => k === key) || (key.startsWith("model:") && claudeModelShown(key.slice(6)))
+  return CLAUDE_WINDOWS.some(([, k]) => k === key) || key === "cowork_credit" || (key.startsWith("model:") && claudeModelShown(key.slice(6)))
 }
 
 // /api/oauth/profile 의 organization_type → 플랜. Max 는 rate_limit_tier 로 5x/20x 를 구분한다.
@@ -406,14 +405,35 @@ function claudePlan(profile) {
   return { claude_max: "max", claude_pro: "pro", claude_team: "team", claude_enterprise: "enterprise" }[org.organization_type] || null
 }
 
-// 플랜은 부가 정보라 실패해도 사용량 조회를 막지 않는다
-async function claudeFetchPlan(accessToken) {
+const claudeOAuthHeaders = (token) => ({ Authorization: `Bearer ${token}`, "anthropic-beta": "oauth-2025-04-20", "User-Agent": CLAUDE.userAgent })
+
+// 프로필(플랜·조직)은 부가 정보라 실패해도 사용량 조회를 막지 않는다
+async function claudeProfile(accessToken) {
   try {
-    const res = await devHttp("GET", CLAUDE.profileUrl, { headers: { Authorization: `Bearer ${accessToken}`, "User-Agent": CLAUDE.userAgent } })
-    return res.ok ? claudePlan(res.json()) : null
+    const res = await devHttp("GET", `${CLAUDE.apiBase}/profile`, { headers: claudeOAuthHeaders(accessToken) })
+    return res.ok ? res.json() : null
   } catch (e) {
     return null
   }
+}
+
+// 선불 크레딧 잔액(Claude Code 의 /usage-credits 와 같은 곳). 없거나 실패하면 null.
+async function claudePrepaid(accessToken, org) {
+  try {
+    const res = await devHttp("GET", `${CLAUDE.apiBase}/organizations/${org}/prepaid/credits`,
+      { headers: { ...claudeOAuthHeaders(accessToken), "x-organization-uuid": org } })
+    const d = res.ok ? res.json() : null
+    return d && typeof d.amount === "number" ? { balance: fromMinor(d.amount, d.currency), currency: d.currency || "USD" } : null
+  } catch (e) {
+    return null
+  }
+}
+
+// 금액은 최소 단위(센트)로 온다. 원·엔처럼 소수점이 없는 통화는 그대로.
+function fromMinor(v, currency) {
+  const n = num(v)
+  if (n == null) return null
+  return ["JPY", "KRW"].includes(String(currency || "USD").toUpperCase()) ? n : n / 100
 }
 
 function claudeWindows(data) {
@@ -432,14 +452,20 @@ function claudeWindows(data) {
     const resets = typeof item.resets_at === "number" ? isoOf(item.resets_at * 1000) : isoOf(msOf(item.resets_at))
     out.push(makeWindow(`model:${model}`, `${model} 이번 주`, clampPct(num(item.percent)), resets, { seconds: 7 * 86400 }))
   }
+  // Claude Code·Cowork 일회성 크레딧(cinder_cove). resets_at 은 만료 시각이다.
+  const cc = data.cinder_cove
+  if (cc && typeof cc === "object" && cc.utilization != null)
+    out.push({ ...makeWindow("cowork_credit", "Claude Code·Cowork 크레딧", clampPct(num(cc.utilization)), isoOf(msOf(cc.resets_at))), kind: "credit" })
   return out
 }
 
+// 추가 사용량. used_credits·monthly_limit 은 센트 단위다(한도가 없으면 monthly_limit 이 null).
 function claudeExtra(data) {
   const e = data.extra_usage
   if (!e || typeof e !== "object" || !e.is_enabled) return {}
-  return { extra_usage: { used: num(e.used_credits), limit: num(e.monthly_limit || e.monthly_credit_limit),
-    used_percent: clampPct(num(e.utilization)), currency: e.currency || null } }
+  const currency = e.currency || "USD"
+  return { extra_usage: { used: fromMinor(e.used_credits, currency), limit: fromMinor(e.monthly_limit ?? e.monthly_credit_limit, currency),
+    used_percent: clampPct(num(e.utilization)), currency } }
 }
 
 // cedar_ember → 초기화권. 일시정지·소진·미시작·만료된 grant 는 빼고 resets_left 만큼 펼친다.
@@ -526,7 +552,7 @@ const claudeProvider = {
     const creds = { oauth: claudeOAuth(data) }
     if (data.organization && data.organization.uuid) creds.org_id = data.organization.uuid
     const account = data.account || {}
-    return { creds, email: account.email_address || account.email || null, plan: await claudeFetchPlan(creds.oauth.access_token) }
+    return { creds, email: account.email_address || account.email || null, plan: claudePlan(await claudeProfile(creds.oauth.access_token)) }
   },
 
   async createManual({ session_key }) {
@@ -537,7 +563,7 @@ const claudeProvider = {
   },
 
   describe: (c) => ({ oauth: !!(c.oauth && c.oauth.refresh_token), session_key: !!c.session_key,
-    reset_credits_supported: !!c.session_key }),
+    reset_credits_supported: !!(c.session_key || c.oauth) }),
 
   async refresh(c) {
     if (!c.oauth || !c.oauth.refresh_token) throw authError(t("err.noRefresh"))
@@ -553,23 +579,37 @@ const claudeProvider = {
   async fetch(creds, ctx) {
     const usage = { windows: [], reset_credits: null, plan: null, email: null, extra: {}, warnings: [] }
     if (creds.oauth) {
-      const get = () => devHttp("GET", CLAUDE.usageUrl, { headers: {
-        Authorization: `Bearer ${creds.oauth.access_token}`, "anthropic-beta": "oauth-2025-04-20", "User-Agent": CLAUDE.userAgent,
-      } })
+      // cedar_ember=1 이면 초기화권도 같이 온다(Claude Code 와 같은 요청). 거부되면 옵션 없이 한 번 더.
+      const get = (query = "?cedar_ember=1") => devHttp("GET", `${CLAUDE.apiBase}/usage${query}`, { headers: claudeOAuthHeaders(creds.oauth.access_token) })
       let res = await get()
       if (res.status === 401) {
         creds = await ctx.refresh(creds)
         res = await get()
       }
+      if (!res.ok && ![401, 403, 429].includes(res.status) && !res.challenge) res = await get("")
       checkAuth(res, "Claude OAuth")
       checkCommon(res, t("what.claudeUsage"))
       const data = res.json()
       usage.windows = claudeWindows(data)
       usage.extra = claudeExtra(data)
-      // 사용량 응답에는 플랜이 없어 프로필로 따로 조회(바뀔 일이 드물어 모를 때만)
-      if (!ctx.knownPlan) usage.plan = await claudeFetchPlan(creds.oauth.access_token)
+      if (data.cedar_ember) usage.reset_credits = claudeResetCredits(data.cedar_ember, Date.now())
+      // 사용량 응답에는 플랜·조직이 없어 프로필로 따로 조회(바뀔 일이 드물어 모를 때만)
+      if (!ctx.knownPlan || !creds.org_id) {
+        const profile = await claudeProfile(creds.oauth.access_token)
+        if (!ctx.knownPlan) usage.plan = claudePlan(profile)
+        const org = profile && profile.organization && profile.organization.uuid
+        if (org && !creds.org_id) {
+          creds = { ...creds, org_id: org }
+          ctx.save({ org_id: org })
+        }
+      }
+      if (creds.org_id) {
+        const prepaid = await claudePrepaid(creds.oauth.access_token, creds.org_id)
+        if (prepaid) usage.extra = { ...usage.extra, prepaid }
+      }
     }
-    if (creds.session_key) {
+    // OAuth 로 초기화권을 못 받았을 때만 claude.ai 웹(sessionKey)으로
+    if (creds.session_key && !usage.reset_credits) {
       let web = null
       try {
         web = await claudeWebUsage(creds, ctx)
@@ -1309,6 +1349,27 @@ function fmtPct(p) {
   return p == null ? "–" : `${Math.round(p)}%`
 }
 
+// 퍼센트를 사용한 양으로 볼지 남은 양으로 볼지(앱·위젯 공통). 색은 늘 사용률로 정한다.
+let _showLeft = null
+const showLeft = () => (_showLeft == null ? (_showLeft = kcGet("aiusage.show") === "left") : _showLeft)
+
+function setShowLeft(on) {
+  Keychain.set("aiusage.show", on ? "left" : "used")
+  _showLeft = on
+}
+
+const shownPct = (used) => (used == null ? null : showLeft() ? Math.round((100 - used) * 10) / 10 : used)
+
+// 금액 표시 (예: $12.40, ₩3,000)
+function money(v, currency = "USD") {
+  if (v == null) return "–"
+  const cur = String(currency || "USD").toUpperCase()
+  const zero = ["JPY", "KRW"].includes(cur)
+  const n = zero ? Math.round(v).toLocaleString("en-US") : v.toFixed(2)
+  const sym = { USD: "$", EUR: "€", GBP: "£", KRW: "₩", JPY: "¥" }[cur]
+  return sym ? `${sym}${n}` : `${n} ${cur}`
+}
+
 // 남은 기간. 큰 단위 두 개까지 (예: 3일 10시간, 2시간 12분, 46분). 지났거나 없으면 null.
 function fmtDuration(iso) {
   const ms = iso ? new Date(iso).getTime() - Date.now() : NaN
@@ -1320,11 +1381,6 @@ function fmtDuration(iso) {
   const parts = d > 0 ? [t("dur.d", { n: d }), h && t("dur.h", { n: h })]
     : h > 0 ? [t("dur.h", { n: h }), mm && t("dur.m", { n: mm })] : [t("dur.m", { n: mm })]
   return parts.filter(Boolean).join(t("dur.sep"))
-}
-
-// "2시간 12분 후 초기화" · 이미 지났으면 "곧 초기화" · 정보가 없으면 ""
-function resetText(iso) {
-  return timeCandidates(iso)[0] || ""
 }
 
 function fmtAgo(iso) {
@@ -1565,14 +1621,14 @@ function windowCell(parent, w, width, dim) {
   // minimumScaleFactor 를 쓰면 줄마다 글자 크기가 달라지므로 쓰지 않는다
   addText(top, windowTitle(w), Font.systemFont(12), C.sub, { minScale: 0.8 })
   top.addSpacer()
-  addText(top, fmtPct(w.used_percent), Font.semiboldSystemFont(13), pctTextColor(w.used_percent, dim, C.text), { opacity: dim ? 0.55 : 1 })
+  addText(top, fmtPct(shownPct(w.used_percent)), Font.semiboldSystemFont(13), pctTextColor(w.used_percent, dim, C.text), { opacity: dim ? 0.55 : 1 })
 
   cell.addSpacer(3)
-  const bar = cell.addImage(barImage(w.used_percent, width, 6, dim ? C.dimBar : pctColor(w.used_percent)))
+  const bar = cell.addImage(barImage(shownPct(w.used_percent), width, 6, dim ? C.dimBar : pctColor(w.used_percent)))
   bar.imageSize = new Size(width, 6)
   // 남은 시간은 막대 아래 작은 글씨로 (정보가 없어도 줄 높이는 유지)
   cell.addSpacer(2)
-  addText(cell, resetText(w.resets_at) || " ", Font.systemFont(10), C.sub, { opacity: 0.85 })
+  addText(cell, timeCandidates(w.resets_at, w.kind)[0] || " ", Font.systemFont(10), C.sub, { opacity: 0.85 })
   return cell
 }
 
@@ -1652,7 +1708,7 @@ function buildHomeWidget(result, size, param) {
     head.layoutHorizontally()
     head.centerAlignContent()
     head.size = new Size(inner, 0)
-    addText(head, APP_TITLE, Font.semiboldSystemFont(13), C.text)
+    addText(head, showLeft() ? `${APP_TITLE} · ${t("show.leftTag")}` : APP_TITLE, Font.semiboldSystemFont(13), C.text)
     head.addSpacer()
     addText(head, offline ? `${t("pill.offline")} · ${fmtAgo(data.generated_at)}` : t("widget.updated", { ago: fmtAgo(data.generated_at) }),
       Font.systemFont(10), offline ? C.warn : C.sub)
@@ -1685,7 +1741,7 @@ function buildAccessoryWidget(result, family, param) {
     addText(w, `${APP_TITLE} –`, Font.systemFont(12), Color.white())
     return w
   }
-  const parts = (acc) => primaryWindows(acc).map((x) => fmtPct(x.used_percent)).join(" · ")
+  const parts = (acc) => primaryWindows(acc).map((x) => fmtPct(shownPct(x.used_percent))).join(" · ")
   const short = (acc) => providerName(acc.provider)
   if (family === "accessoryInline") {
     addText(w, accounts.slice(0, 2).map((a) => `${(PROVIDER_STYLE[a.provider] || {}).abbr || short(a)} ${parts(a)}`).join("  "), Font.systemFont(12), Color.white())
@@ -1704,7 +1760,7 @@ function buildAccessoryWidget(result, family, param) {
     top.addSpacer()
     const bottom = s.addStack()
     bottom.addSpacer()
-    addText(bottom, pw ? fmtPct(pw.used_percent) : "–", Font.boldSystemFont(14), Color.white())
+    addText(bottom, pw ? fmtPct(shownPct(pw.used_percent)) : "–", Font.boldSystemFont(14), Color.white())
     bottom.addSpacer()
     return w
   }
@@ -1811,7 +1867,7 @@ async function checkAlerts(accounts) {
       continue
     }
     if (acc.stale) continue // 이전 값이면 비교하지 않는다
-    for (const w of acc.windows || []) {
+    for (const w of (acc.windows || []).filter((x) => x.kind !== "credit")) {
       const key = `${acc.id}:${w.key}`
       const prev = seen[key]
       if (prev && isEarlyReset(prev, w, now)) {
@@ -2196,8 +2252,8 @@ function measureItemsFor(acc, usage, style) {
   if (plan) items.push({ text: plan, size: 10, weight: 700 })
   for (const pill of statusPills(u, { enabled: acc.enabled })) items.push({ text: pill.text, size: PILL_FONT[0], weight: PILL_FONT[1] })
   for (const w of u.windows || []) {
-    items.push({ text: windowTitle(w), size: s.title[0], weight: s.title[1] }, { text: fmtPct(w.used_percent), size: s.pct, weight: 600 })
-    for (const c of timeCandidates(w.resets_at)) items.push({ text: c, size: s.time, weight: 400 })
+    items.push({ text: windowTitle(w), size: s.title[0], weight: s.title[1] }, { text: fmtPct(shownPct(w.used_percent)), size: s.pct, weight: 600 })
+    for (const c of timeCandidates(w.resets_at, w.kind)) items.push({ text: c, size: s.time, weight: 400 })
   }
   if (style === "detail")
     for (const item of (u.reset_credits && u.reset_credits.items) || []) items.push({ text: creditLeft(item).text, size: PILL_FONT[0], weight: PILL_FONT[1] })
@@ -2260,10 +2316,11 @@ function drawAccountHead(ctx, acc, { plan, pills, dim }, W, style) {
   drawTextAt(ctx, providerLine(acc), h.x, h.lineY, right - h.x - 6, h.line + 5, Font.systemFont(h.line), p.sub)
 }
 
-// 남은 시간 표기 후보(긴 것부터). 이름과 겹치면 짧은 것으로 바꾼다.
-function timeCandidates(iso) {
+// 남은 시간 표기 후보(긴 것부터). 이름과 겹치면 짧은 것으로 바꾼다. 크레딧(kind: credit)은 초기화 대신 만료.
+function timeCandidates(iso, kind) {
   if (!iso) return []
   const left = fmtDuration(iso)
+  if (kind === "credit") return left ? [t("credit.expiresIn", { t: left }), t("reset.inShort", { t: left })] : [t("credit.soon")]
   return left ? [t("reset.in", { t: left }), t("reset.inShort", { t: left })] : [t("reset.soon")]
 }
 
@@ -2272,17 +2329,17 @@ function drawWindowLine(ctx, w, y, width, dim, style) {
   const p = pal()
   const s = LINE_STYLE[style]
   const pct = w.used_percent
-  const pctText = fmtPct(pct)
+  const pctText = fmtPct(shownPct(pct))
   const title = windowTitle(w)
   const titleFont = s.title[1] >= 500 ? Font.mediumSystemFont(s.title[0]) : Font.systemFont(s.title[0])
   drawTextAt(ctx, pctText, width - 80, y, 80, s.pct + 6, Font.semiboldSystemFont(s.pct), pctTextColor(pct, dim, p.text), "right")
   const timeRight = width - textW(pctText, s.pct, 600) - 8
   const room = timeRight - textW(title, s.title[0], s.title[1]) - 14
-  const time = timeCandidates(w.resets_at).find((c) => textW(c, s.time, 400) <= room)
+  const time = timeCandidates(w.resets_at, w.kind).find((c) => textW(c, s.time, 400) <= room)
   const titleRight = time ? timeRight - textW(time, s.time, 400) - 10 : timeRight
   drawTextAt(ctx, title, 0, y + s.titleY, titleRight, s.title[0] + 6, titleFont, style === "card" ? p.sub : p.text)
   if (time) drawTextAt(ctx, time, 0, y + s.timeY, timeRight, s.time + 5, Font.systemFont(s.time), new Color(p.sub.hex, 0.85), "right")
-  drawBar(ctx, 0, y + s.barY, width, s.barH, pct, dim || pct == null ? p.sub : pctColor(pct), p.track)
+  drawBar(ctx, 0, y + s.barY, width, s.barH, shownPct(pct), dim || pct == null ? p.sub : pctColor(pct), p.track)
 }
 
 // 메인 화면의 계정 카드. 앱은 공간이 넓어 한도마다 한 줄씩(가로 전체) 모두 보여준다.
@@ -2316,7 +2373,9 @@ function windowRowImage(w, dim) {
   const W = cardWidth()
   const ctx = newCtx(W, 58)
   drawWindowLine(ctx, w, 0, W, dim, "detail")
-  drawTextAt(ctx, w.resets_at ? t("detail.resetAt", { date: fmtDate(w.resets_at) }) : t("detail.noReset"), 0, 42, W, 16, Font.systemFont(11), p.sub)
+  const date = !w.resets_at ? t("detail.noReset")
+    : t(w.kind === "credit" ? "credit.oneTimeExpires" : "detail.resetAt", { date: fmtDate(w.resets_at) })
+  drawTextAt(ctx, date, 0, 42, W, 16, Font.systemFont(11), p.sub)
   return ctx.getImage()
 }
 
@@ -2544,9 +2603,19 @@ async function accountDetail(accountId) {
       else page.add(textRow(t("detail.creditsFailed"), usage.error))
     }
 
-    const { extra_usage: eu, credits: cr } = usage.extra || {}
-    if (eu) page.add(textRow(t("detail.extraUsage"), `${eu.used ?? "–"} / ${eu.limit ?? "–"} ${eu.currency || ""} (${fmtPct(eu.used_percent)})`))
-    else if (cr) page.add(textRow(t("detail.creditBalance"), cr.unlimited ? t("detail.unlimited") : t("detail.balance", { n: cr.balance ?? "–" })))
+    const { extra_usage: eu, prepaid, credits: cr } = usage.extra || {}
+    if (eu || prepaid) {
+      page.add(headerRow(t("detail.usageCredits")))
+      if (eu) {
+        const spent = eu.limit != null
+          ? t("detail.spentOf", { used: money(eu.used, eu.currency), limit: money(eu.limit, eu.currency), pct: fmtPct(eu.used_percent) })
+          : t("detail.spent", { used: money(eu.used, eu.currency) })
+        page.add(textRow(t("detail.extraUsage"), spent))
+      }
+      if (prepaid) page.add(valueRow(t("detail.prepaid"), money(prepaid.balance, prepaid.currency)))
+    } else if (cr) {
+      page.add(textRow(t("detail.creditBalance"), cr.unlimited ? t("detail.unlimited") : t("detail.balance", { n: cr.balance ?? "–" })))
+    }
 
     page.add(headerRow(t("detail.manage")))
     page.add(actionRow(t("detail.refresh"), page.run(() => api("POST", `/v1/accounts/${accountId}/refresh`, undefined, 60)), ACCENT))
@@ -2600,6 +2669,7 @@ async function settingsPage() {
     page.add(headerRow(t("settings.widgetNotify")))
     page.add(valueRow(t("settings.notify"), n.enabled ? t("settings.notifyOn", { n: n.threshold }) : t("common.off"), page.run(notifyPage)))
     page.add(linkRow(t("settings.preview"), page.run(widgetPreviewPage)))
+    page.add(valueRow(t("show.title"), t(showLeft() ? "show.left" : "show.used"), page.run(() => setShowLeft(!showLeft())), { valueWidth: 40 }))
     const setting = langSetting()
     page.add(valueRow(t("settings.language"), LANG_INFO[setting] ? LANG_INFO[setting].name : t("lang.auto"), page.run(languagePage), { valueWidth: 50 }))
 
@@ -2744,7 +2814,7 @@ async function mainMenu() {
       page.add(noticeRow({ title: t(getConfig().device ? "common.loadFailed" : "main.serverFailed"), detail: e.message, color: C.bad }))
     }
 
-    page.add(headerRow(t("main.accounts", { n: accounts.length })))
+    page.add(headerRow(t("main.accounts", { n: accounts.length }) + (showLeft() ? ` · ${t("show.leftTag")}` : "")))
     if (!accounts.length) page.add(textRow(t("main.noAccounts"), null, { color: Color.gray() }))
     await measureTexts(accounts.flatMap((acc) => measureItemsFor(acc, usage[acc.id], "card")))
     for (const acc of accounts) {
@@ -2759,6 +2829,7 @@ async function mainMenu() {
     page.add(headerRow(t("main.actions")))
     page.add(linkRow(t("add.title"), page.run(addAccountPage)))
     page.add(actionRow(t("main.refreshAll"), page.run(() => (refresh = true)), ACCENT))
+    page.add(actionRow(t(showLeft() ? "show.toUsed" : "show.toLeft"), page.run(() => setShowLeft(!showLeft())), ACCENT))
     page.add(linkRow(t("settings.title"), page.run(settingsPage)))
   })
 }
@@ -2814,6 +2885,7 @@ function localLabel(label) {
   if (label === "주간") return t("win.weekly")
   if (label === "추가 한도") return t("win.extra")
   if (label === "모델별") return t("win.byModel")
+  if (label === "Claude Code·Cowork 크레딧") return t("win.coworkCredit")
   if ((m = label.match(/^(\d+)시간$/))) return t("dur.h", { n: m[1] })
   if ((m = label.match(/^(\d+)일$/))) return t("dur.d", { n: m[1] })
   if ((m = label.match(/^(.+) 이번 주$/))) return t("win.modelWeek", { model: m[1] })
@@ -2874,6 +2946,7 @@ const STRINGS = {
   "win.modelWeek": ["{model} 이번 주", "{model} this week", "{model} 今週", "{model} 本周"],
   "win.weekly": ["주간", "Weekly", "週間", "每周"],
   "win.extra": ["추가 한도", "Extra limit", "追加枠", "额外额度"],
+  "win.coworkCredit": ["Claude Code·Cowork 크레딧", "Claude Code & Cowork credit", "Claude Code・Cowork クレジット", "Claude Code·Cowork 额度"],
   "win.byModel": ["모델별", "By model", "モデル別", "按模型"],
 
   // 위젯
@@ -2984,6 +3057,10 @@ const STRINGS = {
   "detail.noCredits": ["지금 쓸 수 있는 초기화권이 없어요", "No reset credits available right now", "今使えるリセット券はありません", "目前没有可用的重置券"],
   "detail.needSk": ["sessionKey가 있어야 확인할 수 있어요", "A sessionKey is needed to check", "確認には sessionKey が必要です", "需要 sessionKey 才能查看"],
   "detail.creditsFailed": ["확인하지 못했어요", "Couldn't check", "確認できませんでした", "无法查询"],
+  "detail.usageCredits": ["사용 크레딧", "Usage credits", "利用クレジット", "用量积分"],
+  "detail.spentOf": ["{used} / {limit} 사용 ({pct})", "{used} of {limit} used ({pct})", "{used} / {limit} 使用（{pct}）", "已用 {used} / {limit}（{pct}）"],
+  "detail.spent": ["{used} 사용 (한도 없음)", "{used} used (no limit)", "{used} 使用（上限なし）", "已用 {used}（无上限）"],
+  "detail.prepaid": ["선불 잔액", "Prepaid balance", "前払い残高", "预付余额"],
   "detail.extraUsage": ["추가 사용량", "Extra usage", "追加使用量", "额外用量"],
   "detail.creditBalance": ["크레딧", "Credits", "クレジット", "积分"],
   "detail.unlimited": ["무제한", "Unlimited", "無制限", "无限"],
@@ -3004,11 +3081,19 @@ const STRINGS = {
   "credit.noExpiry": ["만료 없음", "No expiry", "期限なし", "无期限"],
   "credit.daysLeft": ["{n}일 남음", "{n}d left", "残り{n}日", "剩 {n} 天"],
   "credit.left": ["{t} 남음", "{t} left", "残り{t}", "剩 {t}"],
+  "credit.expiresIn": ["{t} 후 만료", "Expires in {t}", "{t}後に期限切れ", "{t}后过期"],
+  "credit.oneTimeExpires": ["일회성 · {date} 만료", "One-time · expires {date}", "1回限り · {date} 期限", "一次性 · {date} 过期"],
   "credit.soon": ["곧 만료", "Expiring", "まもなく期限切れ", "即将过期"],
   "credit.expires": ["{date} 만료", "Expires {date}", "{date} 期限", "{date} 过期"],
   "credit.granted": ["{date} 지급", "Granted {date}", "{date} 付与", "{date} 发放"],
 
   // 설정
+  "show.title": ["퍼센트 표시", "Percent shows", "パーセント表示", "百分比显示"],
+  "show.used": ["사용한 양", "Used", "使用量", "已用"],
+  "show.left": ["남은 양", "Remaining", "残り", "剩余"],
+  "show.leftTag": ["남은 양", "remaining", "残り", "剩余"],
+  "show.toLeft": ["남은 양으로 보기", "Show remaining", "残りを表示", "显示剩余"],
+  "show.toUsed": ["사용한 양으로 보기", "Show used", "使用量を表示", "显示已用"],
   "settings.title": ["설정", "Settings", "設定", "设置"],
   "settings.connection": ["연결 방식", "Connection", "接続方法", "连接方式"],
   "settings.widgetNotify": ["위젯·알림", "Widget & notifications", "ウィジェット・通知", "小组件与通知"],

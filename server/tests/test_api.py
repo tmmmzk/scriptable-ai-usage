@@ -28,6 +28,7 @@ class FakeUpstream:
         self.calls = []
         self.codex_refresh_count = 0
         self.claude_usage_status = 200
+        self.oauth_cedar = None  # dict 면 OAuth 응답에 초기화권, "reject" 면 cedar_ember=1 을 거부
 
     def __call__(self, method, url, headers=None, json_body=None, form=None, timeout=20):
         self.calls.append((method, url, headers or {}, json_body, form))
@@ -47,13 +48,24 @@ class FakeUpstream:
             assert json_body["refresh_token"] == "c-rt-1"
             return resp({"access_token": "c-at-2", "refresh_token": "c-rt-2", "expires_in": 28800})
         if url == "https://api.anthropic.com/api/oauth/profile":
-            return resp({"organization": {"organization_type": "claude_max", "rate_limit_tier": "default_claude_max_5x"}})
-        if url == "https://api.anthropic.com/api/oauth/usage":
+            return resp({"organization": {"uuid": "org-1", "organization_type": "claude_max", "rate_limit_tier": "default_claude_max_5x"}})
+        if url == "https://api.anthropic.com/api/oauth/organizations/org-1/prepaid/credits":
+            assert hdrs["x-organization-uuid"] == "org-1"
+            return resp({"amount": 2300, "currency": "USD"})  # 센트
+        if f"{u.scheme}://{u.netloc}{u.path}" == "https://api.anthropic.com/api/oauth/usage":
             assert hdrs["anthropic-beta"] == "oauth-2025-04-20"
             if self.claude_usage_status != 200:
                 return resp({"error": "x"}, self.claude_usage_status)
-            return resp({"five_hour": {"utilization": 10, "resets_at": "2026-10-03T05:00:00Z"},
-                         "seven_day": {"utilization": 20, "resets_at": "2026-10-09T00:00:00Z"}})
+            cedar = urllib.parse.parse_qs(u.query).get("cedar_ember") == ["1"]
+            if cedar and self.oauth_cedar == "reject":
+                return resp({"error": "unknown parameter"}, 400)
+            body = {"five_hour": {"utilization": 10, "resets_at": "2026-10-03T05:00:00Z"},
+                    "seven_day": {"utilization": 20, "resets_at": "2026-10-09T00:00:00Z"},
+                    "extra_usage": {"is_enabled": True, "used_credits": 1240, "monthly_limit": 5000, "utilization": 24.8, "currency": "USD"},
+                    "cinder_cove": {"utilization": 40, "resets_at": "2099-02-01T00:00:00Z"}}
+            if cedar and isinstance(self.oauth_cedar, dict):
+                body["cedar_ember"] = self.oauth_cedar
+            return resp(body)
         if url == "https://claude.ai/api/organizations":
             return resp([{"uuid": "org-api", "capabilities": ["api"]}, {"uuid": "org-1", "capabilities": ["chat"]}])
         if u.netloc == "claude.ai" and u.path == "/api/organizations/org-1/usage":
@@ -155,12 +167,26 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(acc["email"], "me@example.com")
         self.assertEqual(acc["plan"], "default_claude_max_5x")
         self.assertEqual(acc["status"], "ok")
-        self.assertFalse(acc["auth"]["reset_credits_supported"])
+        self.assertTrue(acc["auth"]["reset_credits_supported"])  # OAuth 로도 초기화권을 받을 수 있다
 
         status, usage = self.call("GET", "/v1/usage")
         entry = usage["accounts"][0]
-        self.assertEqual([w["key"] for w in entry["windows"]], ["session", "weekly"])
+        self.assertEqual([w["key"] for w in entry["windows"]], ["session", "weekly", "cowork_credit"])
+        self.assertEqual(entry["windows"][2]["kind"], "credit")
         self.assertIsNone(entry["reset_credits"])
+        # 금액은 센트로 오므로 달러로 바꾼다
+        self.assertEqual(entry["extra"]["extra_usage"], {"used": 12.4, "limit": 50.0, "used_percent": 24.8, "currency": "USD"})
+        self.assertEqual(entry["extra"]["prepaid"], {"balance": 23.0, "currency": "USD"})
+
+        # OAuth 만으로 초기화권(cedar_ember=1). 거부되면 옵션 없이 다시 조회한다.
+        self.fake.oauth_cedar = {"eligible": True, "grants": [{"resets_left": 2, "ends_at": "2099-03-01T00:00:00Z", "paused": False}]}
+        entry = self.call("POST", f"/v1/accounts/{acc['id']}/refresh")[1]
+        self.assertEqual(entry["reset_credits"]["available"], 2)
+        self.fake.oauth_cedar = "reject"
+        entry = self.call("POST", f"/v1/accounts/{acc['id']}/refresh")[1]
+        self.assertEqual(entry["status"], "ok")
+        self.assertIsNone(entry["reset_credits"])
+        self.fake.oauth_cedar = None
 
         status, acc2 = self.call("PATCH", f"/v1/accounts/{acc['id']}", {"session_key": "sk-ant-sid-test"})
         self.assertEqual(status, 200, acc2)

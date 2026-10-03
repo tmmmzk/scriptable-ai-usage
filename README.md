@@ -28,7 +28,7 @@ Claude, Codex, Google Antigravity 구독 사용량과 **초기화권**을 iPhone
 
 | 서비스 | 사용량 | 초기화권 | 등록 방식 |
 |---|---|---|---|
-| Claude | 현재 세션 / 이번 주 / 모델별 이번 주, 추가 사용량, 플랜 | ✅ (sessionKey 필요) | OAuth 로그인, sessionKey |
+| Claude | 현재 세션 / 이번 주 / 모델별 이번 주, Claude Code·Cowork 크레딧, 추가 사용량·선불 잔액, 플랜 | ✅ (OAuth, 안 되면 sessionKey) | OAuth 로그인, sessionKey |
 | Codex | 5시간 / 주간 / 모델별 추가 한도, 크레딧, 플랜(Plus·Pro·Business 등) | ✅ | OAuth 로그인 |
 | Antigravity | 그룹별(Gemini / Claude·GPT) 5시간·주간, 플랜(Free·AI Pro·AI Ultra 등) | – | Google OAuth 로그인 |
 
@@ -98,7 +98,7 @@ Antigravity 의 Google OAuth 클라이언트 ID/Secret 은 앱 안에 들어 있
 | Codex | `localhost` 페이지로 이동해 "연결할 수 없음"이 뜸 (**정상**) | 주소창의 **전체 URL** |
 | Antigravity | `127.0.0.1` 페이지로 이동해 열리지 않음 (**정상**) | 주소창의 **전체 URL** |
 
-- Claude 초기화권을 보려면 계정 화면의 **sessionKey**에서 값을 넣으세요. 같은 화면에서 바꾸거나 지울 수 있습니다.
+- Claude 초기화권은 OAuth 로그인만으로도 받아 옵니다(Claude Code 와 같은 요청). 표시되지 않으면 계정 화면의 **sessionKey**에서 값을 넣으세요. 같은 화면에서 바꾸거나 지울 수 있습니다.
   - PC 브라우저에서 claude.ai 에 로그인한 뒤 개발자 도구 → Application → Cookies → `https://claude.ai` → `sessionKey` 값입니다.
   - 서버 IP 가 Cloudflare 에 막히면 상태가 `partial` 로 표시되고, 사용량은 OAuth 로 계속 받습니다.
 - 위젯에 빨간 "재로그인" 배지가 보이면 재로그인이 필요하다는 뜻입니다. 계정 화면에서 **다시 로그인**을 누르세요.
@@ -141,6 +141,7 @@ Antigravity 의 Google OAuth 클라이언트 ID/Secret 은 앱 안에 들어 있
 - 한도마다 이름과 사용률, 막대 아래에 `2시간 12분 후 초기화` 처럼 남은 시간이 나옵니다.
 - 상태 표시: 빨간 "재로그인" 배지는 재로그인 필요(막대가 회색으로 흐려짐), 주황 "일부 실패" 배지는 초기화권 등 일부 조회 실패입니다.
 - 막대 색은 70% 미만 초록, 70% 이상 주황, 90% 이상 빨강입니다.
+- 퍼센트는 사용한 양 대신 남은 양으로 볼 수 있습니다. 메인 화면의 **남은 양으로 보기**나 **설정 → 퍼센트 표시**에서 바꾸고, 위젯도 따라갑니다. 색은 어느 쪽이든 사용률 기준입니다.
 - 계정이 많으면 위젯 Parameter 로 보여줄 계정을 고르세요(예: 중형 위젯 두 개에 `개인,회사` / `구글,부계정`).
 - 앱의 **설정 → Claude 로고**로 Claude 로고를 Clawd(Claude Code 마스코트)로 바꿀 수 있습니다. 위젯에도 적용됩니다.
 - 로고는 [LobeHub Icons](https://github.com/lobehub/lobe-icons)(MIT)를 PNG 로 변환해 스크립트에 넣었습니다.

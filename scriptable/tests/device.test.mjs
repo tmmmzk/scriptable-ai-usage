@@ -51,15 +51,24 @@ function upstream(method, url, headers, raw) {
     return ok({ access_token: `c-at-${up.claudeRefreshes + 1}`, refresh_token: `c-rt-${up.claudeRefreshes + 1}`, expires_in: 28800 })
   }
   if (url === "https://api.anthropic.com/api/oauth/profile")
-    return ok({ organization: { organization_type: "claude_max", rate_limit_tier: "default_claude_max_20x" } })
-  if (url === "https://api.anthropic.com/api/oauth/usage") {
+    return ok({ organization: { uuid: "org-1", organization_type: "claude_max", rate_limit_tier: "default_claude_max_20x" } })
+  if (url === "https://api.anthropic.com/api/oauth/organizations/org-1/prepaid/credits") {
+    assert.equal(headers["x-organization-uuid"], "org-1")
+    return ok({ amount: 2300, currency: "USD" }) // 센트
+  }
+  if (u.origin + u.pathname === "https://api.anthropic.com/api/oauth/usage") {
     assert.equal(headers["anthropic-beta"], "oauth-2025-04-20")
     if (up.claudeUsageStatus !== 200) { const s = up.claudeUsageStatus; up.claudeUsageStatus = 200; return ok({}, s) }
+    const cedar = u.searchParams.get("cedar_ember") === "1"
+    if (cedar && up.oauthCedar === "reject") return ok({ error: "unknown parameter" }, 400)
     return ok({ five_hour: { utilization: 10, resets_at: "2099-01-01T05:00:00.123456+00:00" },
-      seven_day: { utilization: 20, resets_at: "2099-01-07T00:00:00Z" }, extra_usage: { is_enabled: true, used_credits: 5, monthly_limit: 50, utilization: 10 },
+      seven_day: { utilization: 20, resets_at: "2099-01-07T00:00:00Z" },
+      extra_usage: { is_enabled: true, used_credits: 1240, monthly_limit: 5000, utilization: 24.8, currency: "USD" }, // 센트
+      cinder_cove: { utilization: 40, resets_at: "2099-02-01T00:00:00Z" }, // Claude Code·Cowork 크레딧
       iguana_necktie: { utilization: 3, resets_at: "2099-01-07T00:00:00Z" }, // 내부 코드네임 블록
       limits: [{ kind: "weekly_scoped", scope: { model: { display_name: "Fable" } }, percent: 33, resets_at: 4070908800 },
-        { kind: "something_else", percent: 1 }] })
+        { kind: "something_else", percent: 1 }],
+      ...(cedar && up.oauthCedar && up.oauthCedar !== "reject" ? { cedar_ember: up.oauthCedar } : {}) })
   }
   if (url === "https://claude.ai/api/organizations") return ok([{ uuid: "org-api", capabilities: ["api"] }, { uuid: "org-1", capabilities: ["chat"] }])
   if (u.host === "claude.ai" && u.pathname === "/api/organizations/org-1/usage") {
@@ -123,7 +132,7 @@ const env = { Keychain, FileManager, UUID, Color, Font, Request, Notification, U
 const api = new Function(...Object.keys(env), body + `
   return { sha256, b64url, b64decode, utf8Bytes, utf8Decode, jwtClaims, pkcePair, parseCallbackInput, deviceApi,
     devGetCreds, devCredKey, getConfig, setMode, KC_AG_CLIENT, msOf, devRefreshCreds, claudeProvider,
-    checkAlerts, saveNotifySettings, planLabel, resetText, claudeWindows, cleanUsage,
+    checkAlerts, saveNotifySettings, planLabel, timeCandidates, claudeWindows, cleanUsage, money, shownPct, setShowLeft,
     setLang, t, fmtDuration, windowTitle, statusText, serverApi, STRINGS, LANG_CODES, primaryWindows, setWidgetGroup,
     isNewer, checkUpdate, installUpdate, restoreBackup, backupVersion, VERSION }`)(...Object.values(env))
 
@@ -183,12 +192,17 @@ await test("Claude OAuth 로그인(PKCE 검증) → 사용량", async () => {
   assert.equal(acc.status, "ok")
   const { accounts } = await call("GET", "/v1/usage")
   const e = accounts[0]
-  // 알려진 키 + limits[] 의 모델별 주간 한도만. iguana_necktie 같은 코드네임은 숨김.
+  // 알려진 키 + limits[] 의 모델별 주간 한도 + Claude Code·Cowork 크레딧. iguana_necktie 같은 코드네임은 숨김.
   assert.deepEqual(e.windows.map((w) => [w.key, w.label, w.used_percent]),
-    [["session", "현재 세션", 10], ["weekly", "이번 주", 20], ["model:Fable", "Fable 이번 주", 33]])
+    [["session", "현재 세션", 10], ["weekly", "이번 주", 20], ["model:Fable", "Fable 이번 주", 33], ["cowork_credit", "Claude Code·Cowork 크레딧", 40]])
   assert.equal(e.windows[2].resets_at, "2099-01-01T00:00:00Z")
   assert.equal(e.windows[0].resets_at, "2099-01-01T05:00:00Z")
-  assert.equal(e.extra.extra_usage.used_percent, 10)
+  assert.equal(e.windows[3].kind, "credit")
+  assert.equal(api.timeCandidates(e.windows[3].resets_at, "credit")[0].endsWith("후 만료"), true)
+  // 추가 사용량·선불 잔액은 센트로 오므로 달러로 바꾼다
+  assert.deepEqual(e.extra.extra_usage, { used: 12.4, limit: 50, used_percent: 24.8, currency: "USD" })
+  assert.deepEqual(e.extra.prepaid, { balance: 23, currency: "USD" })
+  assert.equal(api.money(12.4), "$12.40")
   assert.equal(e.reset_credits, null)
   // 비밀값이 목록에 섞이지 않는다
   const listing = JSON.stringify(await call("GET", "/v1/accounts"))
@@ -210,6 +224,21 @@ await test("10분 안에는 다시 조회하지 않음, refresh=1 은 1분 지�
   await call("GET", "/v1/usage")
   await call("GET", "/v1/usage?refresh=1")
   assert.equal(calls.length, before)
+})
+
+await test("OAuth 만으로 초기화권(cedar_ember=1), 거부되면 옵션 없이 다시 조회", async () => {
+  const web = () => calls.filter((c) => c.url.startsWith("https://claude.ai/")).length
+  const before = web()
+  up.oauthCedar = { eligible: true, grants: [{ resets_left: 1, ends_at: "2099-03-01T00:00:00Z", starts_at: "2020-01-01T00:00:00Z", paused: false }] }
+  let e = await call("POST", `/v1/accounts/${claudeId}/refresh`)
+  assert.equal(e.reset_credits.available, 1)
+  assert.equal(web(), before) // claude.ai 웹(sessionKey)은 쓰지 않았다
+  up.oauthCedar = "reject"
+  e = await call("POST", `/v1/accounts/${claudeId}/refresh`)
+  assert.equal(e.status, "ok")
+  assert.equal(e.windows[0].used_percent, 10)
+  assert.equal(e.reset_credits, null)
+  up.oauthCedar = null
 })
 
 await test("sessionKey 추가 → 초기화권(만료된 grant 제외, 한 장씩)", async () => {
@@ -329,7 +358,7 @@ await test("플랜 표시: Codex Team 은 Business, Claude Max 는 5x/20x", () =
   assert.equal(api.planLabel("team", "claude"), "Team")
   assert.equal(api.planLabel("default_claude_max_20x", "claude"), "Max 20x")
   assert.equal(api.planLabel("plus", "codex"), "Plus")
-  assert.equal(api.resetText(new Date(Date.now() - 60e3).toISOString()), "곧 초기화")
+  assert.equal(api.timeCandidates(new Date(Date.now() - 60e3).toISOString())[0], "곧 초기화")
 })
 
 await test("Claude: 코드네임 블록·모델 행은 숨기고, 예전에 저장된 창도 거른다", () => {
@@ -429,7 +458,7 @@ await test("언어: 모든 문구가 4개 언어로 있고, 시간·한도 이�
   const seen = {}
   for (const lang of api.LANG_CODES) {
     api.setLang(lang)
-    seen[lang] = [api.fmtDuration(at), api.resetText(at), api.windowTitle({ label: "현재 세션" }), api.windowTitle(w),
+    seen[lang] = [api.fmtDuration(at), api.timeCandidates(at)[0], api.windowTitle({ label: "현재 세션" }), api.windowTitle(w),
       api.windowTitle({ label: "5시간", group: "Gemini Models" }), api.statusText("needs_login"), api.t("pill.credits", { n: 1 }),
       api.windowTitle({ label: "주간", group: "추가 한도" })]
   }
@@ -442,6 +471,15 @@ await test("언어: 모든 문구가 4개 언어로 있고, 시간·한도 이�
   assert.equal(api.t("pill.credits", { n: 3 }), "3 resets")
   assert.equal(api.t("no.such.key"), "no.such.key")
   api.setLang("ko")
+})
+
+await test("퍼센트 표시: 사용한 양 ↔ 남은 양", () => {
+  assert.equal(api.shownPct(42), 42)
+  api.setShowLeft(true)
+  assert.equal(api.shownPct(42), 58)
+  assert.equal(api.shownPct(null), null)
+  api.setShowLeft(false)
+  assert.equal(api.shownPct(42), 42)
 })
 
 await test("서버 모드: 프록시가 HTML 오류 페이지를 줘도 상태 코드를 잃지 않는다", async () => {

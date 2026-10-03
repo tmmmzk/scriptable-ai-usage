@@ -92,6 +92,7 @@
 - `windows[].primary`: 작은 위젯에 우선 표시할 창입니다(계정당 최대 2개). Antigravity 는 첫 그룹(보통 Gemini)의 5시간·주간입니다.
 - `windows[].group`: Antigravity 그룹 이름(예: `Gemini Models`)이나 Codex 추가 한도 이름입니다.
 - `windows[].label`: 화면에 그대로 쓰는 이름입니다. Claude 는 `현재 세션`·`이번 주`·`<모델> 이번 주`, Codex·Antigravity 는 `5시간`·`주간` 처럼 기간으로 표시합니다.
+- `windows[].kind`: `"credit"` 이면 한도가 아니라 일회성 크레딧입니다(Claude `Claude Code·Cowork 크레딧`). `resets_at` 은 만료 시각입니다.
 - `plan`: 서비스가 주는 값 그대로입니다(예: Claude `default_claude_max_20x`·`pro`, Codex `plus`·`team`, Antigravity `g1-pro-tier`(AI Pro)·`Free`). 보기 좋은 이름으로 바꾸는 건 위젯이 합니다.
 - `reset_credits`
   - `null`: 조회하지 않았거나 대상이 아닙니다. Claude 는 sessionKey 가 없으면 `null`, Antigravity 는 항상 `null` 입니다.
@@ -99,5 +100,5 @@
   - `items` 는 초기화권 한 장당 하나씩, 만료가 빠른 순서입니다. Codex 는 `title`·`reset_type` 이 채워질 수 있습니다.
   - 초기화권을 사용할 때 쓰는 ID 는 응답에 넣지 않습니다.
 - `extra`
-  - Claude: `extra_usage` (추가 사용량)
+  - Claude: `extra_usage` (추가 사용량. `used`·`limit` 은 통화 단위 금액, 한도가 없으면 `limit` 이 `null`), `prepaid` (선불 크레딧 잔액 `balance`)
   - Codex: `credits` (크레딧 잔액)
