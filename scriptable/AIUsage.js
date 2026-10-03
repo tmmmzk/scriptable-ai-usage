@@ -331,13 +331,14 @@ function fmtUntil(iso, compact = false) {
   const ms = new Date(iso).getTime() - Date.now()
   if (isNaN(ms)) return ""
   if (ms <= 0) return compact ? "곧" : "곧 초기화"
-  const m = Math.floor(ms / 60000)
+  // 단위는 항상 한글, 큰 단위 두 개까지만 (예: 3일 10시간, 2시간 12분, 46분)
+  const m = Math.max(1, Math.floor(ms / 60000))
   const d = Math.floor(m / 1440)
   const h = Math.floor((m % 1440) / 60)
   const mm = m % 60
-  if (d > 0) return compact ? `${d}일${h ? ` ${h}h` : ""}` : `${d}일 ${h}시간`
-  if (h > 0) return compact ? `${h}h${mm ? ` ${mm}m` : ""}` : `${h}시간${mm ? ` ${mm}분` : ""}`
-  return compact ? `${mm}m` : `${mm}분`
+  if (d > 0) return h ? `${d}일 ${h}시간` : `${d}일`
+  if (h > 0) return mm ? `${h}시간 ${mm}분` : `${h}시간`
+  return `${mm}분`
 }
 
 function fmtAgo(iso) {
@@ -378,10 +379,16 @@ function planLabel(plan) {
   return key.replace(/[_-]+/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())
 }
 
-function windowTitle(w) {
+const GROUP_SHORT = { "gemini models": "Gemini", "claude and gpt models": "Claude/GPT" }
+
+function groupShort(group) {
+  return GROUP_SHORT[group.toLowerCase()] || group.split(/\s+/)[0]
+}
+
+// compact: 위젯·카드처럼 좁은 칸. 그룹이 있으면 그룹 이름만 쓴다(예: Gemini).
+function windowTitle(w, compact = false) {
   if (!w.group) return w.label
-  const g = w.group.split(/\s+/)[0]
-  return `${g} ${w.label}`
+  return compact ? groupShort(w.group) : `${groupShort(w.group)} ${w.label}`
 }
 
 function primaryWindows(acc, n = 2) {
@@ -513,12 +520,11 @@ function accountHeader(stack, acc, opts) {
   addLogo(row, acc.provider, opts.logo)
   row.addSpacer(6)
   addText(row, acc.label || style.short, Font.semiboldSystemFont(14), C.text, {
-    minScale: 0.7,
     opacity: opts.dim ? 0.55 : 1,
   })
   if (opts.showProvider) {
     row.addSpacer(6)
-    addText(row, style.short, Font.systemFont(11), C.sub, { minScale: 0.8 })
+    addText(row, style.short, Font.systemFont(11), C.sub)
   }
   row.addSpacer()
   const rc = acc.reset_credits
@@ -550,11 +556,15 @@ function windowCell(parent, w, width, dim) {
   top.bottomAlignContent()
   top.size = new Size(width, 0)
   const until = fmtUntil(w.resets_at, true)
-  addText(top, windowTitle(w), Font.systemFont(11), C.sub, { minScale: 0.7 })
+  // minimumScaleFactor 를 쓰면 줄마다 글자 크기가 달라지므로 쓰지 않는다
+  const title = windowTitle(w, true)
+  addText(top, title, Font.systemFont(11), C.sub)
   top.addSpacer()
-  if (until) {
-    addText(top, until, Font.systemFont(11), C.sub, { minScale: 0.7, opacity: 0.7 })
-    top.addSpacer(5)
+  // 칸이 좁아 이름·시간·퍼센트가 다 안 들어가면 시간은 생략(잘리거나 겹치지 않게)
+  const fits = estWidth(title, 11) + estWidth(until, 11) + estWidth(fmtPct(w.used_percent), 12) + 18 <= width
+  if (until && fits) {
+    addText(top, until, Font.systemFont(11), C.sub, { opacity: 0.7 })
+    top.addSpacer(6)
   }
   const pctColorFor = dim || w.used_percent == null || w.used_percent < 70 ? C.text : pctColor(w.used_percent)
   addText(top, fmtPct(w.used_percent), Font.semiboldSystemFont(12), pctColorFor, { opacity: dim ? 0.55 : 1 })
@@ -957,15 +967,18 @@ function drawPills(ctx, pills, right, y, pal) {
   return x
 }
 
-// 이름 바로 뒤에 플랜 배지. 브랜드 색을 옅게 깔고 글자는 브랜드 색.
-function drawPlanBadge(ctx, provider, plan, x, y, maxRight) {
+// 부제 줄 맨 앞에 플랜 배지(브랜드 색). 배지 폭은 직접 정하므로 뒤 글자와 정확히 맞출 수 있다.
+// 그린 배지의 오른쪽 끝(다음 글자 시작 x)을 돌려준다. lineH 는 부제 글자 줄 높이.
+function drawPlanBadge(ctx, provider, plan, x, y, lineH) {
   const label = planLabel(plan)
-  if (!label) return
-  const w = estWidth(label, 10.5) + 12
-  if (x + w > maxRight) return
+  if (!label) return x
+  const h = 16
+  const w = estWidth(label, 10) + 12
+  const top = y + (lineH - h) / 2
   const brand = (PROVIDER_STYLE[provider] || {}).color || "#8E8E93"
-  fillRound(ctx, new Rect(x, y, w, 17), 5, new Color(brand, pal().dark ? 0.28 : 0.15))
-  drawTextAt(ctx, label, x, y + 2, w, 14, Font.boldSystemFont(10.5), new Color(brand), "center")
+  fillRound(ctx, new Rect(x, top, w, h), 5, new Color(brand, pal().dark ? 0.28 : 0.15))
+  drawTextAt(ctx, label, x, top + 2, w, h - 2, Font.boldSystemFont(10), new Color(brand), "center")
+  return x + w + 6
 }
 
 function accountPills(acc, enabled) {
@@ -989,15 +1002,15 @@ function drawBarCell(ctx, w, x, y, width, dim, p) {
   const pct = w.used_percent
   const color = dim || pct == null ? p.sub : pctColor(pct)
   const pctText = pct == null ? "–" : `${Math.round(pct)}%`
-  const pctW = estWidth(pctText, 14)
-  const title = windowTitle(w)
+  const pctW = Math.ceil(estWidth(pctText, 14) * 1.15)
+  const title = windowTitle(w, true)
   drawTextAt(ctx, title, x, y + 3, width - pctW - 8, 16, Font.systemFont(12), p.sub)
   drawTextAt(ctx, pctText, x + width - 60, y + 1, 60, 20, Font.semiboldSystemFont(14),
     dim || pct == null || pct < 70 ? p.text : pctColor(pct), "right")
   // 남은 시간은 퍼센트 앞에 흐리게. 이름과 겹치면 생략(상세 화면에서 볼 수 있음)
-  if (until && estWidth(title, 12) + estWidth(until, 12) + pctW + 18 <= width) {
-    const end = x + width - pctW - 6
-    drawTextAt(ctx, until, end - 80, y + 3, 80, 16, Font.systemFont(12), new Color(p.sub.hex, 0.7), "right")
+  if (until && estWidth(title, 12) + estWidth(until, 12) + pctW + 22 <= width) {
+    const end = x + width - pctW - 10
+    drawTextAt(ctx, until, end - 90, y + 3, 90, 16, Font.systemFont(12), new Color(p.sub.hex, 0.7), "right")
   }
   fillRound(ctx, new Rect(x, y + 23, width, 7), 3.5, p.track)
   if (pct != null && pct > 0) fillRound(ctx, new Rect(x, y + 23, Math.max(7, (width * Math.min(100, pct)) / 100), 7), 3.5, color)
@@ -1011,10 +1024,10 @@ function accountCardImage(acc, enabled) {
   const ctx = newCtx(W, H)
   const dim = acc.stale || acc.status === "needs_login"
   drawLogo(ctx, acc.provider, 0, 6, 24, p)
-  const right = drawPills(ctx, accountPills(acc, enabled), W, 8, p)
+  const right = drawPills(ctx, accountPills(acc, enabled), W, 10, p)
   drawTextAt(ctx, acc.label, 34, 2, right - 40, 22, Font.semiboldSystemFont(17), dim ? p.sub : p.text)
-  drawPlanBadge(ctx, acc.provider, acc.plan, 34 + estWidth(acc.label, 17) + 6, 5, right - 4)
-  drawTextAt(ctx, providerLine(acc), 34, 22, right - 40, 16, Font.systemFont(12), p.sub)
+  const subX = drawPlanBadge(ctx, acc.provider, acc.plan, 34, 23, 16)
+  drawTextAt(ctx, providerLine(acc), subX, 23, right - subX - 6, 16, Font.systemFont(12), p.sub)
   const ws = primaryWindows(acc)
   if (!ws.length) {
     drawTextAt(ctx, acc.error || STATUS_TEXT[acc.status] || "데이터 없음", 0, 46, W, 32, Font.systemFont(13), p.sub)
@@ -1050,8 +1063,8 @@ function detailHeaderImage(acc, usage) {
   drawLogo(ctx, acc.provider, 0, 8, 40, p)
   const right = drawPills(ctx, accountPills(usage, acc.enabled), W, 18, p)
   drawTextAt(ctx, acc.label, 52, 6, right - 56, 28, Font.boldSystemFont(22), p.text)
-  drawPlanBadge(ctx, acc.provider, usage.plan || acc.plan, 52 + estWidth(acc.label, 22) + 8, 12, right - 4)
-  drawTextAt(ctx, providerLine(acc), 52, 36, right - 56, 18, Font.systemFont(13), p.sub)
+  const subX = drawPlanBadge(ctx, acc.provider, usage.plan || acc.plan, 52, 37, 17)
+  drawTextAt(ctx, providerLine(acc), subX, 37, right - subX - 6, 17, Font.systemFont(13), p.sub)
   return ctx.getImage()
 }
 
