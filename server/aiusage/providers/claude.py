@@ -14,7 +14,7 @@ from typing import Any, Optional
 
 from .. import http
 from ..config import Config
-from ..errors import AuthError, BlockedError, LoginError, ProviderError
+from ..errors import AuthError, LoginError, ProviderError
 from ..util import clamp_pct, iso, now, parse_iso, pkce_pair, to_float
 from .base import (
     LoginResult,
@@ -137,7 +137,7 @@ class ClaudeProvider(Provider):
         session_key = (payload.get("session_key") or "").strip()
         if not session_key.startswith("sk-ant-"):
             raise LoginError("sessionKey 는 'sk-ant-' 로 시작해야 합니다.")
-        org = self._web_org(session_key, None)
+        org = self._web_org(session_key)
         creds = {"session_key": session_key, "org_id": org["uuid"]}
         return LoginResult(creds=creds, email=None, plan=None)
 
@@ -211,14 +211,11 @@ class ClaudeProvider(Provider):
         if creds.get("session_key"):
             try:
                 web_data, creds = self._fetch_web_usage(creds, save_creds)
-            except AuthError as exc:
-                if not creds.get("oauth"):
-                    raise
-                usage.warnings.append(f"sessionKey 만료: {exc}")
             except ProviderError as exc:
                 if not creds.get("oauth"):
-                    raise
-                usage.warnings.append(f"초기화권 조회 실패: {exc}")
+                    raise  # sessionKey 만 있는 계정이면 이게 전부라 실패로 본다
+                label = "sessionKey 만료" if isinstance(exc, AuthError) else "초기화권 조회 실패"
+                usage.warnings.append(f"{label}: {exc}")
 
         if web_data is not None:
             if not usage.windows:
@@ -237,26 +234,19 @@ class ClaudeProvider(Provider):
             return None
 
     def _fetch_oauth_usage(self, creds: dict, save_creds: SaveCreds) -> tuple[dict, dict]:
+        def get(c: dict) -> http.Response:
+            headers = {"Authorization": f"Bearer {c['oauth']['access_token']}", "anthropic-beta": OAUTH_BETA, "User-Agent": USER_AGENT}
+            return http.request("GET", USAGE_URL, headers=headers)
+
         if (creds["oauth"].get("expires_at") or 0) - REFRESH_MARGIN < now():
             creds = self._refresh(creds, save_creds)
-        for attempt in range(2):
-            resp = http.request(
-                "GET",
-                USAGE_URL,
-                headers={
-                    "Authorization": f"Bearer {creds['oauth']['access_token']}",
-                    "anthropic-beta": OAUTH_BETA,
-                    "User-Agent": USER_AGENT,
-                },
-            )
-            if resp.status == 401 and attempt == 0:
-                creds = self._refresh(creds, save_creds)
-                continue
-            if resp.status in (401, 403) and not resp.cloudflare_challenge:
-                raise AuthError(f"Claude OAuth 인증 실패(HTTP {resp.status})", resp.status)
-            http.raise_for_common(resp, "Claude 사용량")
-            return resp.json(), creds
-        raise AuthError("Claude OAuth 인증 실패")
+        resp = get(creds)
+        if resp.status == 401:  # 만료 전에 폐기됐을 수 있어 한 번만 갱신해 다시
+            creds = self._refresh(creds, save_creds)
+            resp = get(creds)
+        http.raise_for_auth(resp, "Claude OAuth")
+        http.raise_for_common(resp, "Claude 사용량")
+        return resp.json(), creds
 
     def _web_headers(self, session_key: str) -> dict:
         return {
@@ -265,18 +255,13 @@ class ClaudeProvider(Provider):
             "Accept": "application/json",
         }
 
-    def _web_org(self, session_key: str, wanted: Optional[str]) -> dict:
+    def _web_org(self, session_key: str) -> dict:
         resp = http.request("GET", f"{WEB_BASE}/organizations", headers=self._web_headers(session_key))
-        if resp.status in (401, 403) and not resp.cloudflare_challenge:
-            raise AuthError(f"sessionKey 인증 실패(HTTP {resp.status})", resp.status)
+        http.raise_for_auth(resp, "sessionKey")
         http.raise_for_common(resp, "claude.ai 조직 조회")
         orgs = resp.json()
         if not isinstance(orgs, list) or not orgs:
             raise ProviderError("claude.ai 조직 목록이 비어 있습니다.")
-        if wanted:
-            for org in orgs:
-                if org.get("uuid") == wanted:
-                    return org
 
         def caps(org: dict) -> set:
             return {str(c).lower() for c in (org.get("capabilities") or [])}
@@ -293,16 +278,13 @@ class ClaudeProvider(Provider):
         session_key = creds["session_key"]
         org_id = creds.get("org_id")
         if not org_id:
-            org_id = self._web_org(session_key, None)["uuid"]
+            org_id = self._web_org(session_key)["uuid"]
             creds = dict(creds, org_id=org_id)
             save_creds(creds)
         base = f"{WEB_BASE}/organizations/{org_id}/usage"
         resp = http.request("GET", f"{base}?cedar_ember=1", headers=self._web_headers(session_key))
-        if resp.status in (401, 403) and not resp.cloudflare_challenge:
-            raise AuthError(f"sessionKey 인증 실패(HTTP {resp.status})", resp.status)
-        if resp.status == 403 and resp.cloudflare_challenge:
-            raise BlockedError("claude.ai 가 서버 IP 를 Cloudflare 챌린지로 막았습니다.", 403)
-        if not resp.ok and resp.status != 429:
+        http.raise_for_auth(resp, "sessionKey")
+        if not resp.ok and resp.status != 429 and not resp.cloudflare_challenge:
             # 초기화권 옵트인이 거부되면 옵션 없이 한 번 더(사용량은 받을 수 있음)
             resp = http.request("GET", base, headers=self._web_headers(session_key))
         http.raise_for_common(resp, "claude.ai 사용량")

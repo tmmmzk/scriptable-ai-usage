@@ -17,7 +17,6 @@ class Store:
     """
 
     def __init__(self, data_dir: str):
-        self.data_dir = data_dir
         os.makedirs(data_dir, mode=0o700, exist_ok=True)
         self._accounts_path = os.path.join(data_dir, "accounts.json")
         self._snapshots_path = os.path.join(data_dir, "snapshots.json")

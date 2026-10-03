@@ -118,7 +118,8 @@ const env = { Keychain, FileManager, UUID, Color, Font, Request, Notification, U
 const api = new Function(...Object.keys(env), body + `
   return { sha256, b64url, b64decode, utf8Bytes, utf8Decode, jwtClaims, pkcePair, parseCallbackInput, deviceApi,
     devGetCreds, devCredKey, getConfig, setMode, KC_AG_CLIENT, msOf, devRefreshCreds, claudeProvider,
-    checkAlerts, saveNotifySettings, planLabel, resetText, claudeWindows, cleanUsage }`)(...Object.values(env))
+    checkAlerts, saveNotifySettings, planLabel, resetText, claudeWindows, cleanUsage,
+    setLang, t, fmtDuration, windowTitle, statusText, serverApi, STRINGS, LANG_CODES }`)(...Object.values(env))
 
 let passed = 0
 const test = async (name, fn) => { await fn(); passed++; console.log("ok -", name) }
@@ -186,6 +187,16 @@ await test("Claude OAuth 로그인(PKCE 검증) → 사용량", async () => {
   // 비밀값이 목록에 섞이지 않는다
   const listing = JSON.stringify(await call("GET", "/v1/accounts"))
   for (const secret of ["c-at-1", "c-rt-1"]) assert.ok(!listing.includes(secret))
+})
+
+await test("로그인: 없는·만료된 로그인은 404(언어와 상관없이 알아본다), 다른 서비스 계정으로는 재로그인 불가", async () => {
+  await assert.rejects(call("POST", "/v1/logins/nope/complete", { input: "x#y" }), (e) => e.status === 404)
+  await assert.rejects(call("POST", "/v1/logins", { provider: "codex", account_id: claudeId }), (e) => e.status === 404)
+})
+
+await test("사용량: ?accounts= 로 이름·id 거르기", async () => {
+  assert.deepEqual((await call("GET", "/v1/usage?accounts=" + encodeURIComponent("개인"))).accounts.map((a) => a.id), [claudeId])
+  assert.deepEqual((await call("GET", "/v1/usage?accounts=nobody")).accounts, [])
 })
 
 await test("10분 안에는 다시 조회하지 않음, refresh=1 은 1분 지나야", async () => {
@@ -392,6 +403,44 @@ await test("알림: 종류별로 끄기, 예정보다 이른 초기화 감지", 
   await api.checkAlerts([acc("e4", 0, at(7 * 24 * H))])
   assert.equal(notifications.filter((n) => n.id.startsWith("aiusage-early")).length, 0)
   api.saveNotifySettings({ enabled: true, threshold: 90 })
+})
+
+await test("언어: 모든 문구가 4개 언어로 있고, 시간·한도 이름·상태가 바뀐다", () => {
+  for (const [key, row] of Object.entries(api.STRINGS)) assert.equal(row.length, api.LANG_CODES.length, key)
+  const at = new Date(Date.now() + (2 * 60 + 12) * 60e3 + 30e3).toISOString()
+  const w = { label: "Fable 이번 주" }
+  const seen = {}
+  for (const lang of api.LANG_CODES) {
+    api.setLang(lang)
+    seen[lang] = [api.fmtDuration(at), api.resetText(at), api.windowTitle({ label: "현재 세션" }), api.windowTitle(w),
+      api.windowTitle({ label: "5시간", group: "Gemini Models" }), api.statusText("needs_login"), api.t("pill.credits", { n: 1 }),
+      api.windowTitle({ label: "주간", group: "추가 한도" }, true)]
+  }
+  assert.deepEqual(seen.ko, ["2시간 12분", "2시간 12분 후 초기화", "현재 세션", "Fable 이번 주", "Gemini 5시간", "재로그인 필요", "초기화권 1", "추가"])
+  assert.deepEqual(seen.en, ["2h 12m", "Resets in 2h 12m", "Current session", "Fable this week", "Gemini 5h", "Sign-in needed", "1 reset", "Extra limit"])
+  assert.deepEqual(seen.ja.slice(0, 3), ["2時間12分", "2時間12分後にリセット", "現在のセッション"])
+  assert.deepEqual(seen.zh.slice(0, 3), ["2小时12分钟", "2小时12分钟后重置", "当前会话"])
+  assert.equal(api.t("pill.credits", { n: 3 }), "重置券 3")
+  api.setLang("en")
+  assert.equal(api.t("pill.credits", { n: 3 }), "3 resets")
+  assert.equal(api.t("no.such.key"), "no.such.key")
+  api.setLang("ko")
+})
+
+await test("서버 모드: 프록시가 HTML 오류 페이지를 줘도 상태 코드를 잃지 않는다", async () => {
+  const realLoad = Request.prototype.loadString
+  const reply = (status, body) => { Request.prototype.loadString = async function () { this.response = { statusCode: status, headers: {} }; return body } }
+  const cfg = { server: "https://ai.example.com/", apiKey: "k" }
+  try {
+    reply(502, "<html>Bad Gateway</html>")
+    await assert.rejects(api.serverApi(cfg, "GET", "/v1/usage"), (e) => e.status === 502 && e.message === "HTTP 502")
+    reply(401, JSON.stringify({ error: "API 키가 올바르지 않습니다." }))
+    await assert.rejects(api.serverApi(cfg, "GET", "/v1/usage"), (e) => e.status === 401 && /API 키/.test(e.message))
+    reply(200, JSON.stringify({ accounts: [] }))
+    assert.deepEqual(await api.serverApi(cfg, "GET", "/v1/accounts"), { accounts: [] })
+  } finally {
+    Request.prototype.loadString = realLoad
+  }
 })
 
 // ── 3. 위젯이 기기 모드에서 그려지는지 (전체 스크립트 실행) ──

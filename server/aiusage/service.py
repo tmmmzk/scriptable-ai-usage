@@ -8,7 +8,7 @@ from typing import Iterable, Optional
 
 from . import providers
 from .config import Config
-from .errors import LoginError, ProviderError
+from .errors import LoginError, LoginNotFound, ProviderError
 from .store import Store
 from .util import iso, now, parse_iso
 
@@ -116,8 +116,8 @@ class UsageService:
             self.store.put_snapshot(account_id, snap)
             return snap
 
-    def refresh_many(self, account_ids: Iterable[str], force: bool = False, timeout: float = 25) -> None:
-        futures = [self._pool.submit(self.refresh_account, aid, force) for aid in account_ids]
+    def refresh_many(self, account_ids: Iterable[str], timeout: float = 25) -> None:
+        futures = [self._pool.submit(self.refresh_account, aid) for aid in account_ids]
         wait(futures, timeout=timeout)
 
     def usage_payload(self, ids: Optional[list[str]] = None, refresh: bool = False) -> dict:
@@ -138,7 +138,7 @@ class UsageService:
         def loop() -> None:
             while not self._stop.is_set():
                 ids = [a["id"] for a in self.store.list_accounts() if a.get("enabled", True)]
-                self.refresh_many(ids, force=False, timeout=120)
+                self.refresh_many(ids, timeout=120)
                 self._expire_logins()
                 self._stop.wait(self.cfg.poll_interval)
 
@@ -162,7 +162,7 @@ class UsageService:
         if account_id:
             acc = self.store.get(account_id)
             if acc is None or acc["provider"] != provider_id:
-                raise LoginError("재로그인할 계정을 찾을 수 없습니다.")
+                raise LoginNotFound("재로그인할 계정을 찾을 수 없습니다.")
         start = provider.start_login(self.cfg)
         login_id = secrets.token_urlsafe(16)
         self._expire_logins()
@@ -187,7 +187,7 @@ class UsageService:
         with self._logins_guard:
             entry = self._logins.get(login_id)
         if entry is None:
-            raise LoginError("로그인 세션이 없거나 만료되었습니다. 처음부터 다시 시작하세요.")
+            raise LoginNotFound("로그인 세션이 없거나 만료되었습니다. 처음부터 다시 시작하세요.")
         provider = providers.get(entry["provider"])
         result = provider.finish_login(self.cfg, entry["pending"], user_input)
         with self._logins_guard:

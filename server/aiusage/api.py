@@ -6,10 +6,10 @@ import logging
 import re
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, Callable, Optional
+from typing import Any, Callable
 
 from . import __version__
-from .errors import LoginError, ProviderError
+from .errors import LoginError, LoginNotFound, ProviderError
 from .service import UsageService
 
 log = logging.getLogger("aiusage.api")
@@ -152,6 +152,8 @@ def make_handler(svc: UsageService) -> type[BaseHTTPRequestHandler]:
                 raise ApiError(405 if matched_path else 404, "지원하지 않는 경로입니다.")
             except ApiError as exc:
                 self._send(exc.status, {"error": str(exc)})
+            except LoginNotFound as exc:
+                self._send(404, {"error": str(exc)})
             except LoginError as exc:
                 self._send(400, {"error": str(exc)})
             except ProviderError as exc:
@@ -171,11 +173,9 @@ def serve(svc: UsageService, host: str, port: int) -> ThreadingHTTPServer:
     return server
 
 
-def run(svc: UsageService, host: str, port: int, ready: Optional[Callable[[], None]] = None) -> None:
+def run(svc: UsageService, host: str, port: int) -> None:
     server = serve(svc, host, port)
     log.info("listening on http://%s:%d", host, port)
-    if ready:
-        ready()
     try:
         server.serve_forever()
     finally:

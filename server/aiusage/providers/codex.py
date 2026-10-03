@@ -163,8 +163,7 @@ class CodexProvider(Provider):
         if resp.status == 401:
             creds = self._refresh(creds, save_creds)
             resp = self._get("/wham/usage", creds)
-        if resp.status in (401, 403) and not resp.cloudflare_challenge:
-            raise AuthError(f"Codex 인증 실패(HTTP {resp.status})", resp.status)
+        http.raise_for_auth(resp, "Codex")
         http.raise_for_common(resp, "Codex 사용량")
         data = resp.json()
 

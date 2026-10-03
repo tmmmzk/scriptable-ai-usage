@@ -9,10 +9,11 @@
 // • 앱에서 실행하면 설정·계정 관리 화면이 열립니다.
 // • 위젯 Parameter 에 계정 이름(또는 id)을 쉼표로 적으면 그 계정만 표시합니다. 예) 개인,회사
 
-const VERSION = "0.3.0"
+const VERSION = "0.4.0"
 const KC_SERVER = "aiusage.server"
 const KC_KEY = "aiusage.apikey"
 const CACHE_FILE = "aiusage-cache.json"
+const APP_TITLE = "AI Usage"
 const WIDGET_REFRESH_MIN = 15
 
 const PROVIDER_STYLE = {
@@ -32,16 +33,30 @@ const C = {
   // DrawContext 이미지에는 dynamic 색이 적용되지 않으므로 양쪽 모드에서 보이는 반투명 단색
   track: new Color("#8E8E93", 0.25),
   pill: Color.dynamic(new Color("#787880", 0.14), new Color("#787880", 0.28)),
+  dimBar: new Color("#8E8E93", 0.7),
   ok: new Color("#34C759"),
   warn: new Color("#FF9F0A"),
   bad: new Color("#FF453A"),
 }
 
 // ───────────────────────── 설정 / API ─────────────────────────
+const fm = FileManager.local() // 앱과 위젯이 같이 쓰는 Scriptable 문서 폴더
+
+const kcGet = (key, fallback = null) => (Keychain.contains(key) ? Keychain.get(key) : fallback)
+
+function kcJSON(key, fallback) {
+  try {
+    const v = JSON.parse(kcGet(key, "null"))
+    return v == null ? fallback : v
+  } catch (e) {
+    return fallback
+  }
+}
+
 function getConfig() {
   if (getMode() === "device") return { device: true }
-  const server = Keychain.contains(KC_SERVER) ? Keychain.get(KC_SERVER) : null
-  const apiKey = Keychain.contains(KC_KEY) ? Keychain.get(KC_KEY) : null
+  const server = kcGet(KC_SERVER)
+  const apiKey = kcGet(KC_KEY)
   return server && apiKey ? { server, apiKey } : null
 }
 
@@ -67,8 +82,7 @@ const DEV_LOCK_MS = 30 * 1000
 const DEV_LOGIN_TTL_MS = 15 * 60 * 1000
 
 function getMode() {
-  if (Keychain.contains(KC_MODE)) return Keychain.get(KC_MODE)
-  return Keychain.contains(KC_SERVER) ? "server" : null // 기기 모드가 생기기 전 설정
+  return kcGet(KC_MODE) || (Keychain.contains(KC_SERVER) ? "server" : null) // 뒤쪽은 기기 모드가 생기기 전 설정
 }
 
 function setMode(mode) {
@@ -239,7 +253,7 @@ async function devHttp(method, url, { headers = {}, json, form, timeout = 15 } =
   try {
     text = await req.loadString()
   } catch (e) {
-    throw new ProviderError(`네트워크 오류: ${e.message || e}`)
+    throw new ProviderError(t("err.network", { msg: e.message || e }))
   }
   const res = req.response || {}
   const status = res.statusCode || 0
@@ -254,7 +268,7 @@ async function devHttp(method, url, { headers = {}, json, form, timeout = 15 } =
       try {
         return JSON.parse(this.text)
       } catch (e) {
-        throw new ProviderError(`JSON 파싱 실패: ${this.text.slice(0, 120)}`)
+        throw new ProviderError(t("err.json", { text: this.text.slice(0, 120) }))
       }
     },
   }
@@ -262,13 +276,13 @@ async function devHttp(method, url, { headers = {}, json, form, timeout = 15 } =
 
 // 401/403(챌린지 제외) → 재로그인 필요
 function checkAuth(res, what) {
-  if ((res.status === 401 || res.status === 403) && !res.challenge) throw authError(`${what}: 인증 실패(HTTP ${res.status})`)
+  if ((res.status === 401 || res.status === 403) && !res.challenge) throw authError(t("err.auth", { what, status: res.status }))
 }
 
 // 429, Cloudflare, 그 밖의 오류
 function checkCommon(res, what) {
-  if (res.status === 429) throw new ProviderError(`${what}: 요청 한도 초과(429)`, "rate_limited")
-  if (res.status === 403 && res.challenge) throw new ProviderError(`${what}: Cloudflare 챌린지로 차단됨`, "blocked")
+  if (res.status === 429) throw new ProviderError(t("err.rateLimited", { what }), "rate_limited")
+  if (res.status === 403 && res.challenge) throw new ProviderError(t("err.blocked", { what }), "blocked")
   if (!res.ok) throw new ProviderError(`${what}: HTTP ${res.status} ${res.text.slice(0, 160)}`)
 }
 
@@ -278,8 +292,8 @@ const isoOf = (ms) => (ms == null || isNaN(ms) ? null : new Date(ms).toISOString
 // ISO-8601 → epoch ms. 소수점 자릿수가 긴 값(나노초)도 처리.
 function msOf(v) {
   if (typeof v !== "string" || !v.trim()) return null
-  const t = Date.parse(v.trim().replace(/(\.\d{3})\d+/, "$1"))
-  return isNaN(t) ? null : t
+  const ms = Date.parse(v.trim().replace(/(\.\d{3})\d+/, "$1"))
+  return isNaN(ms) ? null : ms
 }
 
 function num(v) {
@@ -327,7 +341,7 @@ function resetCreditsSummary(credits, available = null) {
 // 사용자가 붙여넣은 값 → { code, state }. 리다이렉트 전체 URL, code#state, code 만 모두 허용.
 function parseCallbackInput(raw) {
   const text = String(raw || "").trim()
-  if (!text) throw new ProviderError("입력이 비어 있습니다.")
+  if (!text) throw new ProviderError(t("err.emptyInput"))
   if (text.includes("://") || text.includes("code=")) {
     const query = text.includes("?") ? text.split("?").slice(1).join("?").split("#")[0] : text
     const params = {}
@@ -335,8 +349,8 @@ function parseCallbackInput(raw) {
       const [k, v = ""] = part.split("=")
       if (k) params[decodeURIComponent(k)] = decodeURIComponent(v.replace(/\+/g, " "))
     }
-    if (params.error) throw new ProviderError(`로그인 거부/실패: ${params.error}`)
-    if (!params.code) throw new ProviderError("URL에 code 파라미터가 없습니다. 주소창의 전체 URL을 복사했는지 확인하세요.")
+    if (params.error) throw new ProviderError(t("err.loginDenied", { error: params.error }))
+    if (!params.code) throw new ProviderError(t("err.noCode"))
     return { code: params.code, state: params.state || null }
   }
   if (text.includes("#")) {
@@ -347,11 +361,15 @@ function parseCallbackInput(raw) {
 }
 
 function checkState(expected, got) {
-  if (got != null && got !== expected) throw new ProviderError("state 값이 일치하지 않습니다. 로그인을 처음부터 다시 시작하세요.")
+  if (got != null && got !== expected) throw new ProviderError(t("err.state"))
 }
 
-const authorizeUrl = (base, params) =>
-  `${base}?${Object.entries(params).map(([k, v]) => `${k}=${encodeURIComponent(v)}`).join("&")}`
+const authorizeUrl = (base, params) => `${base}?${formEncode(params)}`
+const expiresAt = (data) => Date.now() + (num(data.expires_in) || 3600) * 1000
+
+function checkTokenExchange(res) {
+  if (!res.ok) throw new ProviderError(t("err.tokenExchange", { status: res.status, text: res.text.slice(0, 160) }))
+}
 
 // ── Claude ──
 const CLAUDE = {
@@ -451,13 +469,13 @@ function claudeResetCredits(block, at) {
 }
 
 function claudeOAuth(data, prev = {}) {
-  if (!data.access_token) throw new ProviderError("토큰 응답에 access_token 이 없습니다.")
+  if (!data.access_token) throw new ProviderError(t("err.noAccessToken"))
   const scopes = typeof data.scope === "string" ? data.scope.split(" ") : data.scope
   return {
     access_token: data.access_token,
     // 리프레시 토큰은 쓸 때마다 바뀐다. 응답에 없으면 이전 값을 유지.
     refresh_token: data.refresh_token || prev.refresh_token,
-    expires_at: Date.now() + (num(data.expires_in) || 3600) * 1000,
+    expires_at: expiresAt(data),
     scopes: scopes || prev.scopes || CLAUDE.scopes,
   }
 }
@@ -467,9 +485,9 @@ const claudeWebHeaders = (key) => ({ Cookie: `sessionKey=${key}`, "User-Agent": 
 async function claudeWebOrg(sessionKey) {
   const res = await devHttp("GET", `${CLAUDE.webBase}/organizations`, { headers: claudeWebHeaders(sessionKey) })
   checkAuth(res, "sessionKey")
-  checkCommon(res, "claude.ai 조직 조회")
+  checkCommon(res, t("what.claudeOrg"))
   const orgs = res.json()
-  if (!Array.isArray(orgs) || !orgs.length) throw new ProviderError("claude.ai 조직 목록이 비어 있습니다.")
+  if (!Array.isArray(orgs) || !orgs.length) throw new ProviderError(t("err.noOrgs"))
   const caps = (o) => (o.capabilities || []).map((c) => String(c).toLowerCase())
   return orgs.find((o) => caps(o).includes("chat")) || orgs.find((o) => caps(o).join() !== "api") || orgs[0]
 }
@@ -477,7 +495,7 @@ async function claudeWebOrg(sessionKey) {
 async function claudeWebUsage(creds, ctx) {
   if (!creds.org_id) {
     creds = { ...creds, org_id: (await claudeWebOrg(creds.session_key)).uuid }
-    ctx.save(creds)
+    ctx.save({ org_id: creds.org_id })
   }
   const base = `${CLAUDE.webBase}/organizations/${creds.org_id}/usage`
   const headers = claudeWebHeaders(creds.session_key)
@@ -485,7 +503,7 @@ async function claudeWebUsage(creds, ctx) {
   checkAuth(res, "sessionKey")
   // 초기화권 옵트인이 거부되면 옵션 없이 한 번 더(사용량은 받을 수 있음)
   if (!res.ok && res.status !== 429 && !res.challenge) res = await devHttp("GET", base, { headers })
-  checkCommon(res, "claude.ai 사용량")
+  checkCommon(res, t("what.claudeWeb"))
   return res.json()
 }
 
@@ -503,20 +521,16 @@ const claudeProvider = {
         code: "true", client_id: CLAUDE.clientId, response_type: "code", redirect_uri: CLAUDE.redirectUri,
         scope: CLAUDE.scopes.join(" "), code_challenge: challenge, code_challenge_method: "S256", state,
       }),
-      instructions: "Claude 계정으로 로그인해 승인하면 코드가 나와요. 'Copy Code'를 눌러 복사한 뒤 돌아오세요.",
-      input_hint: "복사한 코드 (code#state 형식)",
       pending: { verifier, state },
     }
   },
 
-  async finishLogin(pending, input) {
-    const { code, state } = parseCallbackInput(input)
-    checkState(pending.state, state)
+  async finishLogin(pending, code) {
     const res = await devHttp("POST", CLAUDE.tokenUrl, { json: {
       grant_type: "authorization_code", code, redirect_uri: CLAUDE.redirectUri, client_id: CLAUDE.clientId,
       code_verifier: pending.verifier, state: pending.state,
     } })
-    if (!res.ok) throw new ProviderError(`토큰 교환 실패: HTTP ${res.status} ${res.text.slice(0, 160)}`)
+    checkTokenExchange(res)
     const data = res.json()
     const creds = { oauth: claudeOAuth(data) }
     if (data.organization && data.organization.uuid) creds.org_id = data.organization.uuid
@@ -526,7 +540,7 @@ const claudeProvider = {
 
   async createManual({ session_key }) {
     const key = String(session_key || "").trim()
-    if (!key.startsWith("sk-ant-")) throw new ProviderError("sessionKey 는 'sk-ant-' 로 시작해야 합니다.")
+    if (!key.startsWith("sk-ant-")) throw new ProviderError(t("err.skPrefix"))
     const org = await claudeWebOrg(key)
     return { creds: { session_key: key, org_id: org.uuid }, email: null }
   },
@@ -535,20 +549,19 @@ const claudeProvider = {
     reset_credits_supported: !!c.session_key }),
 
   async refresh(c) {
-    if (!c.oauth || !c.oauth.refresh_token) throw authError("리프레시 토큰이 없습니다. 다시 로그인하세요.")
+    if (!c.oauth || !c.oauth.refresh_token) throw authError(t("err.noRefresh"))
     const res = await devHttp("POST", CLAUDE.tokenUrl, { json: {
       grant_type: "refresh_token", refresh_token: c.oauth.refresh_token, client_id: CLAUDE.clientId,
       scope: (c.oauth.scopes || CLAUDE.scopes).join(" "),
     } })
-    if ([400, 401, 403].includes(res.status)) throw authError(`토큰 갱신 거부(HTTP ${res.status}). 다시 로그인하세요.`)
-    checkCommon(res, "Claude 토큰 갱신")
+    if ([400, 401, 403].includes(res.status)) throw authError(t("err.refreshDenied", { status: res.status }))
+    checkCommon(res, t("what.claudeRefresh"))
     return { ...c, oauth: claudeOAuth(res.json(), c.oauth) }
   },
 
   async fetch(creds, ctx) {
     const usage = { windows: [], reset_credits: null, plan: null, email: null, extra: {}, warnings: [] }
     if (creds.oauth) {
-      if (this.needsRefresh(creds)) creds = await ctx.refresh(creds)
       const get = () => devHttp("GET", CLAUDE.usageUrl, { headers: {
         Authorization: `Bearer ${creds.oauth.access_token}`, "anthropic-beta": "oauth-2025-04-20", "User-Agent": CLAUDE.userAgent,
       } })
@@ -558,7 +571,7 @@ const claudeProvider = {
         res = await get()
       }
       checkAuth(res, "Claude OAuth")
-      checkCommon(res, "Claude 사용량")
+      checkCommon(res, t("what.claudeUsage"))
       const data = res.json()
       usage.windows = claudeWindows(data)
       usage.extra = claudeExtra(data)
@@ -571,7 +584,7 @@ const claudeProvider = {
         web = await claudeWebUsage(creds, ctx)
       } catch (e) {
         if (!creds.oauth) throw e
-        usage.warnings.push(e.kind === "needs_login" ? `sessionKey 만료: ${e.message}` : `초기화권 조회 실패: ${e.message}`)
+        usage.warnings.push(t(e.kind === "needs_login" ? "warn.skExpired" : "warn.creditsFailed", { msg: e.message }))
       }
       if (web) {
         if (!usage.windows.length) {
@@ -601,7 +614,7 @@ function codexIdInfo(idToken) {
 }
 
 function codexCreds(data, prev = {}) {
-  if (!data.access_token) throw new ProviderError("토큰 응답에 access_token 이 없습니다.")
+  if (!data.access_token) throw new ProviderError(t("err.noAccessToken"))
   const id_token = data.id_token || prev.id_token
   return {
     access_token: data.access_token,
@@ -676,20 +689,16 @@ const codexProvider = {
         scope: "openid profile email offline_access", code_challenge: challenge, code_challenge_method: "S256",
         id_token_add_organizations: "true", codex_cli_simplified_flow: "true", originator: "codex_cli_rs", state,
       }),
-      instructions: "ChatGPT 계정으로 로그인하면 '연결할 수 없음' 페이지가 떠요. 정상이에요. 주소창의 주소를 통째로 복사한 뒤 돌아오세요.",
-      input_hint: "localhost:1455 로 시작하는 주소 전체",
       pending: { verifier, state },
     }
   },
 
-  async finishLogin(pending, input) {
-    const { code, state } = parseCallbackInput(input)
-    checkState(pending.state, state)
+  async finishLogin(pending, code) {
     const res = await devHttp("POST", `${CODEX.issuer}/oauth/token`, { form: {
       grant_type: "authorization_code", code, redirect_uri: CODEX.redirectUri, client_id: CODEX.clientId,
       code_verifier: pending.verifier,
     } })
-    if (!res.ok) throw new ProviderError(`토큰 교환 실패: HTTP ${res.status} ${res.text.slice(0, 160)}`)
+    checkTokenExchange(res)
     const creds = codexCreds(res.json())
     const info = codexIdInfo(creds.id_token)
     return { creds, email: info.email, plan: info.plan }
@@ -698,17 +707,16 @@ const codexProvider = {
   describe: (c) => ({ oauth: !!c.refresh_token, reset_credits_supported: true }),
 
   async refresh(c) {
-    if (!c.refresh_token) throw authError("리프레시 토큰이 없습니다. 다시 로그인하세요.")
+    if (!c.refresh_token) throw authError(t("err.noRefresh"))
     const res = await devHttp("POST", `${CODEX.issuer}/oauth/token`, { json: {
       client_id: CODEX.clientId, grant_type: "refresh_token", refresh_token: c.refresh_token, scope: "openid profile email",
     } })
-    if (res.status === 400 || res.status === 401) throw authError(`토큰 갱신 거부(HTTP ${res.status}) ${res.text.slice(0, 120)}`)
-    checkCommon(res, "Codex 토큰 갱신")
+    if (res.status === 400 || res.status === 401) throw authError(`${t("err.refreshDenied", { status: res.status })} ${res.text.slice(0, 120)}`)
+    checkCommon(res, t("what.codexRefresh"))
     return codexCreds(res.json(), c)
   },
 
   async fetch(creds, ctx) {
-    if (this.needsRefresh(creds)) creds = await ctx.refresh(creds)
     const get = (path, extra = {}) => devHttp("GET", `${CODEX.apiBase}${path}`, { headers: {
       Authorization: `Bearer ${creds.access_token}`, "User-Agent": CODEX.userAgent, originator: "codex_cli_rs",
       ...(creds.account_id ? { "ChatGPT-Account-Id": creds.account_id } : {}), ...extra,
@@ -719,7 +727,7 @@ const codexProvider = {
       res = await get("/wham/usage")
     }
     checkAuth(res, "Codex")
-    checkCommon(res, "Codex 사용량")
+    checkCommon(res, t("what.codexUsage"))
     const data = res.json()
     const usage = {
       windows: codexWindows(data), reset_credits: null, extra: codexExtra(data), warnings: [],
@@ -727,10 +735,10 @@ const codexProvider = {
     }
     try {
       const rc = await get("/wham/rate-limit-reset-credits", { "OpenAI-Beta": "codex-1" })
-      checkCommon(rc, "Codex 초기화권")
+      checkCommon(rc, t("what.codexCredits"))
       usage.reset_credits = codexResetCredits(rc.json(), Date.now())
     } catch (e) {
-      usage.warnings.push(`초기화권 조회 실패: ${e.message}`)
+      usage.warnings.push(t("warn.creditsFailed", { msg: e.message }))
     }
     return usage
   },
@@ -750,17 +758,13 @@ const AG = {
 
 // Antigravity 앱의 Google OAuth 클라이언트(설정에서 입력)
 function agClient() {
-  try {
-    const c = JSON.parse(Keychain.contains(KC_AG_CLIENT) ? Keychain.get(KC_AG_CLIENT) : "null")
-    return c && c.id && c.secret ? c : null
-  } catch (e) {
-    return null
-  }
+  const c = kcJSON(KC_AG_CLIENT, null)
+  return c && c.id && c.secret ? c : null
 }
 
 function agRequireClient() {
   const c = agClient()
-  if (!c) throw new ProviderError("설정 → Antigravity 로그인 설정에서 Client ID와 Secret을 먼저 넣어 주세요.")
+  if (!c) throw new ProviderError(t("err.agClient"))
   return c
 }
 
@@ -772,8 +776,8 @@ function projectRef(v) {
 
 function pickTier(info) {
   const tiers = info.allowedTiers || []
-  const t = tiers.find((x) => x.isDefault && x.id) || tiers.find((x) => x.id)
-  return (t && t.id) || (info.paidTier || {}).id || (info.currentTier || {}).id || null
+  const tier = tiers.find((x) => x.isDefault && x.id) || tiers.find((x) => x.id)
+  return (tier && tier.id) || (info.paidTier || {}).id || (info.currentTier || {}).id || null
 }
 
 function resolvePlan(info, creds) {
@@ -786,7 +790,7 @@ function resolvePlan(info, creds) {
 }
 
 const usedFromRemaining = (f) => (num(f) == null ? null : clampPct((1 - num(f)) * 100))
-const slug = (t) => t.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "") || "q"
+const slug = (text) => text.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "") || "q"
 
 function agWindowSeconds(window) {
   const w = String(window || "").toUpperCase()
@@ -848,15 +852,15 @@ function agMarkPrimary(windows) {
 async function agPost(method, token, body) {
   const res = await devHttp("POST", `${AG.apiBase}:${method}`, { json: body,
     headers: { Authorization: `Bearer ${token}`, "User-Agent": AG.userAgent } })
-  if (res.status === 401) throw authError("Antigravity 인증 실패(401)")
-  if (res.status === 403) throw new ProviderError(`${method}: 권한 없음(403) ${res.text.slice(0, 160)}`)
+  if (res.status === 401) throw authError(t("err.agAuth"))
+  if (res.status === 403) throw new ProviderError(t("err.forbidden", { method, text: res.text.slice(0, 160) }))
   checkCommon(res, `Antigravity ${method}`)
   return res.json()
 }
 
 const antigravityProvider = {
   methods: ["oauth"],
-  configured: () => (agClient() ? [true, null] : [false, "설정 → Antigravity 로그인 설정에서 Client ID와 Secret을 먼저 넣어 주세요."]),
+  configured: () => (agClient() ? [true, null] : [false, t("err.agClient")]),
   refreshToken: (c) => c.refresh_token,
   needsRefresh: (c) => (c.expires_at || 0) - 2 * 60 * 1000 < Date.now(),
 
@@ -867,24 +871,20 @@ const antigravityProvider = {
         client_id: agRequireClient().id, redirect_uri: AG.redirectUri, response_type: "code", scope: AG.scopes.join(" "),
         access_type: "offline", prompt: "select_account consent", state,
       }),
-      instructions: "Antigravity에서 쓰는 Google 계정으로 로그인하면 열리지 않는 페이지로 이동해요. 정상이에요. 주소창의 주소를 통째로 복사한 뒤 돌아오세요.",
-      input_hint: "127.0.0.1:8585 로 시작하는 주소 전체",
       pending: { state },
     }
   },
 
-  async finishLogin(pending, input) {
+  async finishLogin(pending, code) {
     const client = agRequireClient()
-    const { code, state } = parseCallbackInput(input)
-    checkState(pending.state, state)
     const res = await devHttp("POST", AG.tokenUrl, { form: {
       code, client_id: client.id, client_secret: client.secret, redirect_uri: AG.redirectUri, grant_type: "authorization_code",
     } })
-    if (!res.ok) throw new ProviderError(`토큰 교환 실패: HTTP ${res.status} ${res.text.slice(0, 160)}`)
+    checkTokenExchange(res)
     const data = res.json()
-    if (!data.refresh_token) throw new ProviderError("refresh_token 을 받지 못했습니다. Google 계정 권한에서 앱 연결을 해제한 뒤 다시 시도하세요.")
+    if (!data.refresh_token) throw new ProviderError(t("err.noGoogleRefresh"))
     const creds = { access_token: data.access_token, refresh_token: data.refresh_token,
-      expires_at: Date.now() + (num(data.expires_in) || 3600) * 1000, id_token: data.id_token || null }
+      expires_at: expiresAt(data), id_token: data.id_token || null }
     let email = jwtClaims(creds.id_token).email || null
     if (!email) {
       const info = await devHttp("GET", AG.userinfoUrl, { headers: { Authorization: `Bearer ${creds.access_token}` } })
@@ -900,10 +900,10 @@ const antigravityProvider = {
     const res = await devHttp("POST", AG.tokenUrl, { form: {
       client_id: client.id, client_secret: client.secret, refresh_token: c.refresh_token, grant_type: "refresh_token",
     } })
-    if (res.status === 400 || res.status === 401) throw authError(`Google 토큰 갱신 거부(HTTP ${res.status}). 다시 로그인하세요.`)
-    checkCommon(res, "Google 토큰 갱신")
+    if (res.status === 400 || res.status === 401) throw authError(t("err.refreshDenied", { status: res.status }))
+    checkCommon(res, t("what.googleRefresh"))
     const d = res.json()
-    return { ...c, access_token: d.access_token, expires_at: Date.now() + (num(d.expires_in) || 3600) * 1000,
+    return { ...c, access_token: d.access_token, expires_at: expiresAt(d),
       refresh_token: d.refresh_token || c.refresh_token, id_token: d.id_token || c.id_token }
   },
 
@@ -921,12 +921,11 @@ const antigravityProvider = {
         project = projectRef(info.cloudaicompanionProject)
       }
     }
-    if (project && creds.project_id !== project) ctx.save({ ...creds, project_id: project })
+    if (project && creds.project_id !== project) ctx.save({ project_id: project })
     return { project, plan: resolvePlan(info, creds) }
   },
 
   async fetch(creds, ctx) {
-    if (this.needsRefresh(creds)) creds = await ctx.refresh(creds)
     let ca
     try {
       ca = await this.codeAssist(creds, ctx)
@@ -941,7 +940,7 @@ const antigravityProvider = {
     try {
       usage.windows = agQuotaSummary(await agPost("retrieveUserQuotaSummary", creds.access_token, body))
     } catch (e) {
-      usage.warnings.push(`요약 조회 실패, 모델별 조회로 대체: ${e.message}`)
+      usage.warnings.push(t("warn.summaryFallback", { msg: e.message }))
     }
     if (!usage.windows.length) {
       try {
@@ -979,26 +978,20 @@ const devGetSnap = (id) => readJSON(devSnapName(id), null)
 const devPutSnap = (id, snap) => writeJSON(devSnapName(id), snap)
 const devCredKey = (id) => `aiusage.dev.creds.${id}`
 
-function devGetCreds(id) {
-  try {
-    return Keychain.contains(devCredKey(id)) ? JSON.parse(Keychain.get(devCredKey(id))) : null
-  } catch (e) {
-    return null
-  }
-}
+const devGetCreds = (id) => kcJSON(devCredKey(id), null)
 
 const devSaveCreds = (id, creds) => Keychain.set(devCredKey(id), JSON.stringify(creds))
 
 function devFind(id) {
   const acc = devAccounts().find((a) => a.id === id)
-  if (!acc) throw new ApiError("계정이 없습니다.", 404)
+  if (!acc) throw new ApiError(t("err.noAccount"), 404)
   return acc
 }
 
 function devUpdateAccount(id, fn) {
   const list = devAccounts()
   const acc = list.find((a) => a.id === id)
-  if (!acc) throw new ApiError("계정이 없습니다.", 404)
+  if (!acc) throw new ApiError(t("err.noAccount"), 404)
   fn(acc)
   devSaveAccounts(list)
   return acc
@@ -1007,13 +1000,19 @@ function devUpdateAccount(id, fn) {
 // 토큰 갱신 잠금: 위젯 여러 개와 앱이 동시에 갱신하면 회전된 리프레시 토큰이 무효가 될 수 있다
 const devLockName = (id) => `aiusage-device-lock-${id}`
 
+// 파일 잠금이라 완전히 원자적이진 않다. 쓴 뒤 다시 읽어, 그 사이 다른 쪽이 썼으면 양보한다.
 function devTryLock(id) {
   const p = devPath(devLockName(id))
   try {
-    if (fm.fileExists(p) && Date.now() - Number(fm.readString(p)) < DEV_LOCK_MS) return false
+    if (fm.fileExists(p) && Date.now() - parseInt(fm.readString(p), 10) < DEV_LOCK_MS) return false
   } catch (e) {}
-  fm.writeString(p, String(Date.now()))
-  return true
+  const mine = `${Date.now()}:${randomToken(6)}`
+  fm.writeString(p, mine)
+  try {
+    return fm.readString(p) === mine
+  } catch (e) {
+    return false
+  }
 }
 
 function devUnlock(id) {
@@ -1023,11 +1022,11 @@ function devUnlock(id) {
 }
 
 async function devRefreshCreds(acc, provider, creds) {
-  // 다른 위젯/앱이 먼저 갱신했다면 저장된 새 토큰을 쓴다
-  const latest = devGetCreds(acc.id) || creds
-  if (provider.refreshToken(latest) !== provider.refreshToken(creds) && !provider.needsRefresh(latest)) return latest
   if (!devTryLock(acc.id)) throw new RefreshBusy()
   try {
+    // 잠금을 잡은 뒤 다시 읽는다. 다른 위젯/앱이 먼저 갱신했다면 저장된 새 토큰을 쓴다.
+    const latest = devGetCreds(acc.id) || creds
+    if (provider.refreshToken(latest) !== provider.refreshToken(creds) && !provider.needsRefresh(latest)) return latest
     const next = await provider.refresh(latest)
     devSaveCreds(acc.id, next) // 회전된 리프레시 토큰을 즉시 저장
     return next
@@ -1043,13 +1042,15 @@ async function devRefreshAccount(acc, minAgeMs) {
   const provider = DEVICE_PROVIDERS[acc.provider]
   const snap = { ...prev, fetched_at: isoOf(Date.now()) }
   try {
-    const creds = devGetCreds(acc.id)
-    if (!creds) throw authError("저장된 로그인 정보가 없습니다. 다시 로그인하세요.")
+    let creds = devGetCreds(acc.id)
+    if (!creds) throw authError(t("err.noCreds"))
     const ctx = {
       refresh: (c) => devRefreshCreds(acc, provider, c),
-      save: (c) => devSaveCreds(acc.id, c),
+      // 조회 중에 알아낸 값(org_id, project_id)만 최신 저장값에 덧붙인다(그새 회전된 토큰을 덮지 않게)
+      save: (patch) => devSaveCreds(acc.id, { ...(devGetCreds(acc.id) || {}), ...patch }),
       knownPlan: prev.plan || acc.plan || null,
     }
+    if (provider.needsRefresh(creds)) creds = await ctx.refresh(creds)
     const u = await provider.fetch(creds, ctx)
     Object.assign(snap, {
       status: u.warnings.length ? "partial" : "ok", error: null, warnings: u.warnings, stale: false,
@@ -1069,19 +1070,20 @@ function devCommon(acc, snap) {
     id: acc.id, provider: acc.provider, provider_name: providerName(acc.provider), label: acc.label,
     email: acc.email || snap.email || null, status: snap.status || "pending", error: snap.error || null,
     fetched_at: snap.fetched_at || null, last_success_at: snap.last_success_at || null,
+    plan: snap.plan || acc.plan || null,
   }
 }
 
 function devPublic(acc) {
   const snap = devGetSnap(acc.id) || {}
   const provider = DEVICE_PROVIDERS[acc.provider]
-  return { ...devCommon(acc, snap), plan: snap.plan || acc.plan || null, enabled: acc.enabled !== false,
+  return { ...devCommon(acc, snap), enabled: acc.enabled !== false,
     order: acc.order || 0, created_at: acc.created_at, auth: provider ? provider.describe(devGetCreds(acc.id) || {}) : {} }
 }
 
 function devUsageEntry(acc) {
   const snap = devGetSnap(acc.id) || {}
-  return { ...devCommon(acc, snap), plan: snap.plan || acc.plan || null, warnings: snap.warnings || [],
+  return { ...devCommon(acc, snap), warnings: snap.warnings || [],
     stale: !!snap.stale, windows: snap.windows || [], reset_credits: snap.reset_credits || null, extra: snap.extra || {} }
 }
 
@@ -1112,7 +1114,7 @@ function devUpsert(provider, accountId, label, result) {
 
 function devProvider(id) {
   const p = DEVICE_PROVIDERS[id]
-  if (!p) throw new ApiError(`알 수 없는 서비스: ${id}`, 400)
+  if (!p) throw new ApiError(t("err.unknownProvider", { id }), 400)
   return p
 }
 
@@ -1122,13 +1124,17 @@ async function deviceApi(method, path, body) {
   let m
   try {
     if (route === "GET /v1/usage") {
-      const accounts = devAccounts().filter((a) => a.enabled !== false)
-      const minAge = path.includes("refresh=1") ? DEV_MIN_REFRESH_MS : DEV_AUTO_REFRESH_MS
+      // ?accounts=개인,claude_ab12 처럼 이름이나 id 로 거를 수 있다(서버와 같음)
+      const q = (path.match(/[?&]accounts=([^&]*)/) || [])[1]
+      const only = q ? decodeURIComponent(q).split(",").map((x) => x.trim().toLowerCase()).filter(Boolean) : null
+      const accounts = devAccounts().filter((a) => a.enabled !== false
+        && (!only || only.includes(a.id.toLowerCase()) || only.includes(String(a.label).toLowerCase())))
+      const minAge = /[?&]refresh=1/.test(path) ? DEV_MIN_REFRESH_MS : DEV_AUTO_REFRESH_MS
       await Promise.all(accounts.map((a) => devRefreshAccount(a, minAge)))
       const entries = accounts.map(devUsageEntry)
       // 가장 오래된 조회 시각을 '업데이트' 시각으로 보여준다
       const oldest = Math.min(...entries.map((e) => msOf(e.fetched_at) || Date.now()), Date.now())
-      return { generated_at: isoOf(oldest), poll_interval: 0, accounts: entries }
+      return { generated_at: isoOf(oldest), poll_interval: DEV_AUTO_REFRESH_MS / 1000, accounts: entries }
     }
     if (route === "GET /v1/providers") {
       return { providers: Object.entries(DEVICE_PROVIDERS).map(([id, p]) => {
@@ -1138,14 +1144,16 @@ async function deviceApi(method, path, body) {
     }
     if (route === "GET /v1/accounts") return { accounts: devAccounts().map(devPublic) }
     if (route === "POST /v1/accounts") {
-      const result = await devProvider(body.provider).createManual(body)
+      const p = devProvider(body.provider)
+      if (!p.createManual) throw new ApiError(t("err.unsupported", { route: `${route} (${body.provider})` }), 400)
+      const result = await p.createManual(body)
       const acc = devUpsert(body.provider, null, body.label, result)
       await devRefreshAccount(acc, 0)
       return devPublic(acc)
     }
     if (route === "POST /v1/logins") {
       const p = devProvider(body.provider)
-      if (body.account_id) devFind(body.account_id)
+      if (body.account_id && devFind(body.account_id).provider !== body.provider) throw new ApiError(t("err.noAccount"), 404)
       const start = p.startLogin()
       const logins = readJSON(DEV_LOGINS_FILE, {})
       for (const [k, v] of Object.entries(logins)) if (Date.now() - v.created > DEV_LOGIN_TTL_MS) delete logins[k]
@@ -1153,15 +1161,16 @@ async function deviceApi(method, path, body) {
       logins[loginId] = { provider: body.provider, label: body.label || null, account_id: body.account_id || null,
         pending: start.pending, created: Date.now() }
       writeJSON(DEV_LOGINS_FILE, logins)
-      return { login_id: loginId, provider: body.provider, authorize_url: start.authorize_url,
-        instructions: start.instructions, input_hint: start.input_hint }
+      return { login_id: loginId, provider: body.provider, authorize_url: start.authorize_url }
     }
     if ((m = route.match(/^POST \/v1\/logins\/([\w-]+)\/complete$/))) {
       const logins = readJSON(DEV_LOGINS_FILE, {})
       const entry = logins[m[1]]
       if (!entry || Date.now() - entry.created > DEV_LOGIN_TTL_MS)
-        throw new ApiError("로그인 세션이 없거나 만료되었습니다. 처음부터 다시 시작하세요.", 400)
-      const result = await devProvider(entry.provider).finishLogin(entry.pending, body.input)
+        throw new ApiError(t("err.loginExpired"), 404)
+      const { code, state } = parseCallbackInput(body.input)
+      checkState(entry.pending.state, state)
+      const result = await devProvider(entry.provider).finishLogin(entry.pending, code)
       delete logins[m[1]]
       writeJSON(DEV_LOGINS_FILE, logins)
       const acc = devUpsert(entry.provider, entry.account_id, entry.label, result)
@@ -1176,10 +1185,10 @@ async function deviceApi(method, path, body) {
       const id = m[1]
       const sessionKey = body.session_key
       if (sessionKey != null) {
-        if (devFind(id).provider !== "claude") throw new ApiError("session_key 는 Claude 계정에만 설정할 수 있습니다.", 400)
+        if (devFind(id).provider !== "claude") throw new ApiError(t("err.skClaudeOnly"), 400)
         const creds = devGetCreds(id) || {}
-        if (sessionKey && !String(sessionKey).startsWith("sk-ant-")) throw new ApiError("sessionKey 는 'sk-ant-' 로 시작해야 합니다.", 400)
-        if (!sessionKey && !creds.oauth) throw new ApiError("OAuth 로그인이 없는 계정에서는 sessionKey 를 지울 수 없습니다.", 400)
+        if (sessionKey && !String(sessionKey).startsWith("sk-ant-")) throw new ApiError(t("err.skPrefix"), 400)
+        if (!sessionKey && !creds.oauth) throw new ApiError(t("err.skCantRemove"), 400)
         const next = { ...creds }
         if (sessionKey) {
           next.session_key = sessionKey
@@ -1212,52 +1221,41 @@ async function deviceApi(method, path, body) {
     if (e instanceof ProviderError) throw new ApiError(e.message, 400)
     throw e
   }
-  throw new ApiError(`지원하지 않는 요청: ${route}`, 404)
+  throw new ApiError(t("err.unsupported", { route }), 404)
 }
 
 async function api(method, path, body, timeout = 25) {
   const cfg = getConfig()
-  if (!cfg) throw new ApiError("연결 방식을 먼저 정해 주세요.", 0)
+  if (!cfg) throw new ApiError(t("err.noMode"), 0)
   if (cfg.device) return deviceApi(method, path, body || {})
   return serverApi(cfg, method, path, body, timeout)
 }
 
 // 저장 전에 연결을 확인할 때도 쓰므로 설정을 인자로 받는다.
 async function serverApi(cfg, method, path, body, timeout = 25) {
-  const req = new Request(cfg.server.replace(/\/+$/, "") + path)
-  req.method = method
-  req.timeoutInterval = timeout
-  req.headers = { Authorization: `Bearer ${cfg.apiKey}`, Accept: "application/json" }
-  if (body !== undefined) {
-    req.headers["Content-Type"] = "application/json"
-    req.body = JSON.stringify(body)
-  }
-  let data
+  let res
   try {
-    data = await req.loadJSON()
+    res = await devHttp(method, cfg.server.replace(/\/+$/, "") + path,
+      { headers: { Authorization: `Bearer ${cfg.apiKey}` }, json: body, timeout })
   } catch (e) {
-    throw new ApiError(`서버에 연결하지 못했어요: ${e.message || e}`, 0)
+    throw new ApiError(t("err.server", { msg: e.message || e }), 0)
   }
-  const status = req.response ? req.response.statusCode : 0
-  if (status >= 400) throw new ApiError((data && data.error) || `HTTP ${status}`, status)
+  let data = null
+  try {
+    data = JSON.parse(res.text)
+  } catch (e) {}
+  if (!res.ok) throw new ApiError((data && data.error) || `HTTP ${res.status}`, res.status)
+  if (data == null) throw new ApiError(t("err.server", { msg: t("err.json", { text: res.text.slice(0, 120) }) }), res.status)
   return data
 }
 
 // ───────────────────────── 캐시 ─────────────────────────
-const fm = FileManager.local()
-const cachePath = fm.joinPath(fm.documentsDirectory(), CACHE_FILE)
-
-function readCache() {
-  try {
-    return fm.fileExists(cachePath) ? JSON.parse(fm.readString(cachePath)) : null
-  } catch (e) {
-    return null
-  }
-}
+// 마지막으로 받은 사용량. 연결이 안 될 때 이 값을 흐리게 보여준다.
+const readCache = () => readJSON(CACHE_FILE, null)
 
 function writeCache(data) {
   try {
-    fm.writeString(cachePath, JSON.stringify(data))
+    writeJSON(CACHE_FILE, data)
   } catch (e) {}
 }
 
@@ -1286,7 +1284,7 @@ function cleanUsage(data) {
 
 // ───────────────────────── 포맷 ─────────────────────────
 function pctColor(p) {
-  if (p == null) return C.sub
+  if (p == null) return C.dimBar
   if (p >= 90) return C.bad
   if (p >= 70) return C.warn
   return C.ok
@@ -1296,7 +1294,7 @@ function fmtPct(p) {
   return p == null ? "–" : `${Math.round(p)}%`
 }
 
-// 남은 기간. 단위는 한글, 큰 단위 두 개까지 (예: 3일 10시간, 2시간 12분, 46분). 지났거나 없으면 null.
+// 남은 기간. 큰 단위 두 개까지 (예: 3일 10시간, 2시간 12분, 46분). 지났거나 없으면 null.
 function fmtDuration(iso) {
   const ms = iso ? new Date(iso).getTime() - Date.now() : NaN
   if (!(ms > 0)) return null
@@ -1304,38 +1302,36 @@ function fmtDuration(iso) {
   const d = Math.floor(m / 1440)
   const h = Math.floor((m % 1440) / 60)
   const mm = m % 60
-  if (d > 0) return h ? `${d}일 ${h}시간` : `${d}일`
-  if (h > 0) return mm ? `${h}시간 ${mm}분` : `${h}시간`
-  return `${mm}분`
+  const parts = d > 0 ? [t("dur.d", { n: d }), h && t("dur.h", { n: h })]
+    : h > 0 ? [t("dur.h", { n: h }), mm && t("dur.m", { n: mm })] : [t("dur.m", { n: mm })]
+  return parts.filter(Boolean).join(t("dur.sep"))
 }
 
 // "2시간 12분 후 초기화" · 이미 지났으면 "곧 초기화" · 정보가 없으면 ""
 function resetText(iso) {
-  if (!iso) return ""
-  const left = fmtDuration(iso)
-  return left ? `${left} 후 초기화` : "곧 초기화"
+  return timeCandidates(iso)[0] || ""
 }
 
 function fmtAgo(iso) {
   if (!iso) return "–"
   const m = Math.round((Date.now() - new Date(iso).getTime()) / 60000)
-  if (m < 1) return "방금"
-  if (m < 60) return `${m}분 전`
-  if (m < 1440) return `${Math.floor(m / 60)}시간 전`
-  return `${Math.floor(m / 1440)}일 전`
+  if (m < 1) return t("ago.now")
+  if (m < 60) return t("ago.m", { n: m })
+  if (m < 1440) return t("ago.h", { n: Math.floor(m / 60) })
+  return t("ago.d", { n: Math.floor(m / 1440) })
 }
 
 function fmtDate(iso) {
   if (!iso) return ""
   const df = new DateFormatter()
-  df.locale = "ko_KR"
-  df.dateFormat = "M월 d일 (E) HH:mm"
+  df.locale = LANG_INFO[LANG].locale
+  df.dateFormat = LANG_INFO[LANG].dateFormat
   return df.string(new Date(iso))
 }
 
 function fmtDay(iso) {
   const d = new Date(iso)
-  return `${d.getMonth() + 1}월 ${d.getDate()}일`
+  return t("date.md", { m: d.getMonth() + 1, d: d.getDate(), mon: MONTHS_EN[d.getMonth()] })
 }
 
 // "Claude (me@example.com)"
@@ -1347,7 +1343,7 @@ function providerLine(acc) {
 const PLAN_NAMES = {
   free: "Free", plus: "Plus", pro: "Pro", max: "Max", team: "Team", business: "Business",
   enterprise: "Enterprise", edu: "Edu", paid: "Paid", workspace: "Workspace", legacy: "Legacy",
-  default_claude_max_5x: "Max 5x", default_claude_max_20x: "Max 20x", claude_max: "Max", claude_pro: "Pro",
+  claude_max: "Max", claude_pro: "Pro",
 }
 
 function planLabel(plan, provider) {
@@ -1364,13 +1360,15 @@ function planLabel(plan, provider) {
 const GROUP_SHORT = { "gemini models": "Gemini", "claude and gpt models": "Claude/GPT" }
 
 function groupShort(group) {
-  return GROUP_SHORT[group.toLowerCase()] || group.split(/\s+/)[0]
+  const local = localLabel(group) // 번역되는 기준 이름(예: 모델별, 추가 한도)은 통째로
+  return GROUP_SHORT[group.toLowerCase()] || (local !== group ? local : group.split(/\s+/)[0])
 }
 
 // compact: 위젯·카드처럼 좁은 칸. 그룹이 있으면 그룹 이름만 쓴다(예: Gemini).
 function windowTitle(w, compact = false) {
-  if (!w.group) return w.label
-  return compact ? groupShort(w.group) : `${groupShort(w.group)} ${w.label}`
+  const label = localLabel(w.label)
+  if (!w.group) return label
+  return compact ? groupShort(w.group) : `${groupShort(w.group)} ${label}`
 }
 
 function primaryWindows(acc, n = 2) {
@@ -1384,12 +1382,12 @@ function primaryWindows(acc, n = 2) {
 function statusPills(acc, { enabled, offline } = {}) {
   const pills = []
   const rc = acc.reset_credits
-  if (rc && rc.available > 0) pills.push({ text: `초기화권 ${rc.available}` })
-  if (acc.status === "needs_login") pills.push({ text: "재로그인", color: C.bad })
-  else if (acc.status === "partial") pills.push({ text: "일부 실패", color: C.warn })
-  else if (acc.status && !["ok", "pending"].includes(acc.status)) pills.push({ text: STATUS_TEXT[acc.status] || "오류", color: C.bad })
-  if (enabled === false) pills.push({ text: "숨김", muted: true })
-  if (offline) pills.push({ text: "오프라인", color: C.warn })
+  if (rc && rc.available > 0) pills.push({ text: t("pill.credits", { n: rc.available }) })
+  if (acc.status === "needs_login") pills.push({ text: t("pill.relogin"), color: C.bad })
+  else if (acc.status === "partial") pills.push({ text: t("pill.partial"), color: C.warn })
+  else if (acc.status && !["ok", "pending"].includes(acc.status)) pills.push({ text: statusText(acc.status), color: C.bad })
+  if (enabled === false) pills.push({ text: t("pill.hidden"), muted: true })
+  if (offline) pills.push({ text: t("pill.offline"), color: C.warn })
   return pills
 }
 
@@ -1398,14 +1396,8 @@ function pctTextColor(pct, dim, base) {
   return dim || pct == null || pct < 70 ? base : pctColor(pct)
 }
 
-const STATUS_TEXT = {
-  ok: "정상",
-  partial: "일부 실패",
-  needs_login: "재로그인 필요",
-  error: "오류",
-  blocked: "차단됨",
-  rate_limited: "요청 한도 초과",
-  pending: "대기 중",
+function statusText(status) {
+  return STRINGS[`status.${status}`] ? t(`status.${status}`) : status || t("status.error")
 }
 
 // ───────────────────────── 공용 그리기 (DrawContext) ─────────────────────────
@@ -1435,14 +1427,14 @@ function drawBar(ctx, x, y, width, height, pct, color, track) {
 // ───────────────────────── 위젯 그리기 ─────────────────────────
 // 위젯 크기(pt). iOS 는 기기별로 고정 크기를 쓰므로 화면 폭으로 고른다. 모르는 기기는 비율로 근사.
 const WIDGET_SIZES = {
-  440: { small: 170, medium: 364, large: 382 },
-  430: { small: 170, medium: 364, large: 382 },
-  428: { small: 170, medium: 364, large: 382 },
-  414: { small: 169, medium: 360, large: 379 },
-  402: { small: 162, medium: 345, large: 362 },
-  393: { small: 158, medium: 338, large: 354 },
-  390: { small: 158, medium: 338, large: 354 },
-  375: { small: 155, medium: 329, large: 345 },
+  440: { small: 170, medium: 364 },
+  430: { small: 170, medium: 364 },
+  428: { small: 170, medium: 364 },
+  414: { small: 169, medium: 360 },
+  402: { small: 162, medium: 345 },
+  393: { small: 158, medium: 338 },
+  390: { small: 158, medium: 338 },
+  375: { small: 155, medium: 329 },
 }
 
 function widgetWidth(family) {
@@ -1461,7 +1453,7 @@ const CELL_GAP = 14
 const KC_CLAUDE_LOGO = "aiusage.claudeLogo"
 let _claudeLogo = null
 function claudeLogo() {
-  if (_claudeLogo == null) _claudeLogo = Keychain.contains(KC_CLAUDE_LOGO) ? Keychain.get(KC_CLAUDE_LOGO) : "default"
+  if (_claudeLogo == null) _claudeLogo = kcGet(KC_CLAUDE_LOGO, "default")
   return _claudeLogo
 }
 function setClaudeLogo(v) {
@@ -1500,13 +1492,13 @@ function barImage(pct, width, height, color) {
 }
 
 function addText(stack, text, font, color, opts = {}) {
-  const t = stack.addText(text)
-  t.font = font
-  t.textColor = color
-  t.lineLimit = 1
-  if (opts.minScale) t.minimumScaleFactor = opts.minScale
-  if (opts.opacity != null) t.textOpacity = opts.opacity
-  return t
+  const el = stack.addText(text)
+  el.font = font
+  el.textColor = color
+  el.lineLimit = 1
+  if (opts.minScale) el.minimumScaleFactor = opts.minScale
+  if (opts.opacity != null) el.textOpacity = opts.opacity
+  return el
 }
 
 function addPill(stack, text, color) {
@@ -1555,7 +1547,7 @@ function windowCell(parent, w, width, dim) {
   addText(top, fmtPct(w.used_percent), Font.semiboldSystemFont(13), pctTextColor(w.used_percent, dim, C.text), { opacity: dim ? 0.55 : 1 })
 
   cell.addSpacer(3)
-  const bar = cell.addImage(barImage(w.used_percent, width, 6, dim ? C.sub : pctColor(w.used_percent)))
+  const bar = cell.addImage(barImage(w.used_percent, width, 6, dim ? C.dimBar : pctColor(w.used_percent)))
   bar.imageSize = new Size(width, 6)
   // 남은 시간은 막대 아래 작은 글씨로 (정보가 없어도 줄 높이는 유지)
   cell.addSpacer(2)
@@ -1577,7 +1569,7 @@ function accountBlock(parent, acc, family, inner, offline) {
   const ws = primaryWindows(acc)
   if (!ws.length) {
     block.addSpacer(7)
-    addText(block, acc.error || STATUS_TEXT[acc.status] || "데이터 없음", Font.systemFont(11), C.sub)
+    addText(block, acc.error || statusText(acc.status) || t("common.noData"), Font.systemFont(11), C.sub)
     return block
   }
   if (family === "small") {
@@ -1612,17 +1604,17 @@ function emptyWidget(message) {
   const w = new ListWidget()
   w.backgroundColor = C.bg
   w.setPadding(16, 16, 16, 16)
-  addText(w, "AI 사용량", Font.semiboldSystemFont(14), C.text)
+  addText(w, APP_TITLE, Font.semiboldSystemFont(14), C.text)
   w.addSpacer(6)
-  const t = addText(w, message, Font.systemFont(11), C.sub)
-  t.lineLimit = 4
+  const msg = addText(w, message, Font.systemFont(11), C.sub)
+  msg.lineLimit = 4
   return w
 }
 
 function buildHomeWidget(result, size, param) {
   const { data, offline } = result
   const accounts = filterAccounts(data.accounts || [], param)
-  if (!accounts.length) return emptyWidget("표시할 계정이 없어요. Scriptable 앱에서 계정을 추가해 주세요.")
+  if (!accounts.length) return emptyWidget(t("widget.empty"))
 
   const family = size === "extraLarge" ? "large" : LAYOUT[size] ? size : "medium"
   const L = LAYOUT[family]
@@ -1637,9 +1629,9 @@ function buildHomeWidget(result, size, param) {
     head.layoutHorizontally()
     head.centerAlignContent()
     head.size = new Size(inner, 0)
-    addText(head, "AI 사용량", Font.semiboldSystemFont(13), C.text)
+    addText(head, APP_TITLE, Font.semiboldSystemFont(13), C.text)
     head.addSpacer()
-    addText(head, offline ? "오프라인 · " + fmtAgo(data.generated_at) : `${fmtAgo(data.generated_at)} 확인`,
+    addText(head, offline ? `${t("pill.offline")} · ${fmtAgo(data.generated_at)}` : t("widget.updated", { ago: fmtAgo(data.generated_at) }),
       Font.systemFont(10), offline ? C.warn : C.sub)
     w.addSpacer(8)
   } else if (family === "medium") {
@@ -1656,9 +1648,9 @@ function buildHomeWidget(result, size, param) {
   w.addSpacer()
   if (family === "small" && offline) {
     // 소형은 공간이 빠듯해 오프라인일 때만 알린다
-    addText(w, `오프라인 · ${fmtAgo(data.generated_at)}`, Font.systemFont(10), C.warn)
+    addText(w, `${t("pill.offline")} · ${fmtAgo(data.generated_at)}`, Font.systemFont(10), C.warn)
   } else if (family === "large" && accounts.length > shown.length) {
-    addText(w, `+${accounts.length - shown.length}개 더 · 위젯 Parameter 로 고를 수 있어요`, Font.systemFont(10), C.sub)
+    addText(w, t("widget.more", { n: accounts.length - shown.length }), Font.systemFont(10), C.sub)
   }
   return w
 }
@@ -1667,7 +1659,7 @@ function buildAccessoryWidget(result, family, param) {
   const accounts = filterAccounts(result.data.accounts || [], param)
   const w = new ListWidget()
   if (!accounts.length) {
-    addText(w, "AI 사용량 –", Font.systemFont(12), Color.white())
+    addText(w, `${APP_TITLE} –`, Font.systemFont(12), Color.white())
     return w
   }
   const parts = (acc) => primaryWindows(acc).map((x) => fmtPct(x.used_percent)).join(" · ")
@@ -1714,7 +1706,7 @@ async function runWidget() {
   const param = (args.widgetParameter || "").trim()
   let widget
   if (!getConfig()) {
-    widget = emptyWidget("Scriptable 앱에서 이 스크립트를 한 번 실행해 연결 방식을 골라 주세요.")
+    widget = emptyWidget(t("widget.setup"))
   } else {
     try {
       const result = await loadUsage(false)
@@ -1723,7 +1715,7 @@ async function runWidget() {
         ? buildAccessoryWidget(result, family, param)
         : buildHomeWidget(result, family, param)
     } catch (e) {
-      widget = emptyWidget(`불러오지 못했어요. ${e.message}`)
+      widget = emptyWidget(t("widget.loadFailed", { msg: e.message }))
     }
   }
   widget.refreshAfterDate = new Date(Date.now() + WIDGET_REFRESH_MIN * 60 * 1000)
@@ -1737,18 +1729,13 @@ const KC_NOTIFY = "aiusage.notify"
 const NOTIFY_STATE_FILE = "aiusage-notify-state.json"
 const NOTIFY_KEEP_MS = 14 * DAY_MS
 
-const NOTIFY_TYPES = [
-  { key: "high", title: "사용량 경고", desc: "대표 한도가 기준을 넘었을 때" },
-  { key: "reset", title: "초기화 알림", desc: "기준을 넘긴 한도가 예정 시각에 초기화될 때" },
-  { key: "early", title: "조기 초기화 감지", desc: "예정보다 일찍 한도가 초기화됐을 때" },
-  { key: "login", title: "재로그인 필요", desc: "로그인이 만료돼 사용량을 못 가져올 때" },
-  { key: "credit", title: "초기화권 만료 임박", desc: "초기화권이 하루 안에 만료될 때" },
-]
+// 알림 종류. 이름·설명은 문구의 notify.<종류>.title / .desc
+const NOTIFY_TYPES = ["high", "reset", "early", "login", "credit"]
 
 function notifySettings() {
-  const base = { enabled: true, threshold: 90, types: Object.fromEntries(NOTIFY_TYPES.map((t) => [t.key, true])) }
+  const base = { enabled: true, threshold: 90, types: Object.fromEntries(NOTIFY_TYPES.map((type) => [type, true])) }
   try {
-    const saved = JSON.parse(Keychain.contains(KC_NOTIFY) ? Keychain.get(KC_NOTIFY) : "{}")
+    const saved = kcJSON(KC_NOTIFY, {})
     return { ...base, ...saved, types: { ...base.types, ...(saved.types || {}) } }
   } catch (e) {
     return base
@@ -1769,6 +1756,13 @@ async function sendNotification({ id, title, body, at }) {
   n.openURL = URLScheme.forRunningScript() // 누르면 이 스크립트가 열린다
   if (at) n.setTriggerDate(at)
   await n.schedule()
+}
+
+// 사용량 경고 끝에 붙는 " 2시간 후 초기화돼요."
+function resetSuffix(iso) {
+  if (!iso) return ""
+  const left = fmtDuration(iso)
+  return left ? t("notify.high.resetIn", { t: left }) : t("notify.high.resetSoon")
 }
 
 // 예정 초기화 시각 전에 사용률이 10%p 넘게 떨어졌으면 조기 초기화로 본다
@@ -1794,7 +1788,7 @@ async function checkAlerts(accounts) {
     const who = `${providerName(acc.provider)} · ${acc.label}`
     if (acc.status === "needs_login") {
       if (on("login") && once(`login:${acc.id}:${acc.last_success_at}`))
-        jobs.push({ id: `aiusage-login-${acc.id}`, title: who, body: "다시 로그인해야 사용량을 가져올 수 있어요. 눌러서 열어 주세요." })
+        jobs.push({ id: `aiusage-login-${acc.id}`, title: who, body: t("notify.login.body") })
       continue
     }
     if (acc.stale) continue // 이전 값이면 비교하지 않는다
@@ -1805,7 +1799,7 @@ async function checkAlerts(accounts) {
         cancel.push(`aiusage-reset-${acc.id}-${w.key}`) // 예약해 둔 초기화 알림은 필요 없어졌다
         if (on("early") && once(`early:${key}:${prev.resets_at}`))
           jobs.push({ id: `aiusage-early-${acc.id}-${w.key}`, title: who,
-            body: `${windowTitle(w)} 한도가 예정보다 일찍 초기화됐어요. (${Math.round(prev.used)}% → ${Math.round(w.used_percent)}%)` })
+            body: t("notify.early.body", { name: windowTitle(w), from: Math.round(prev.used), to: Math.round(w.used_percent) }) })
       }
       seen[key] = { used: w.used_percent, resets_at: w.resets_at, at: now }
     }
@@ -1815,19 +1809,19 @@ async function checkAlerts(accounts) {
       const period = `${acc.id}:${w.key}:${w.resets_at}`
       if (on("high") && once(`high:${period}`))
         jobs.push({ id: `aiusage-high-${acc.id}-${w.key}`, title: who,
-          body: `${name} 사용량이 ${Math.round(w.used_percent)}%예요.${w.resets_at ? ` ${resetText(w.resets_at)}돼요.` : ""}` })
+          body: t("notify.high.body", { name, pct: Math.round(w.used_percent) }) + resetSuffix(w.resets_at) })
       const at = msOf(w.resets_at)
       if (on("reset") && at && at > now && once(`reset:${period}`))
-        jobs.push({ id: `aiusage-reset-${acc.id}-${w.key}`, title: who, body: `${name} 한도가 초기화됐어요. 다시 쓸 수 있어요.`, at: new Date(at) })
+        jobs.push({ id: `aiusage-reset-${acc.id}-${w.key}`, title: who, body: t("notify.reset.body", { name }), at: new Date(at) })
     }
     for (const item of (acc.reset_credits && acc.reset_credits.items) || []) {
       const exp = msOf(item.expires_at)
       if (on("credit") && exp && exp > now && exp - now < DAY_MS && once(`credit:${acc.id}:${item.expires_at}`))
         jobs.push({ id: `aiusage-credit-${acc.id}-${exp}`, title: who,
-          body: `초기화권 1장이 ${fmtDuration(item.expires_at)} 뒤에 만료돼요. 필요하면 그 전에 쓰세요.` })
+          body: t("notify.credit.body", { t: fmtDuration(item.expires_at) }) })
     }
   }
-  for (const [key, t] of Object.entries(sent)) if (now - t > NOTIFY_KEEP_MS) delete sent[key]
+  for (const [key, at] of Object.entries(sent)) if (now - at > NOTIFY_KEEP_MS) delete sent[key]
   for (const [key, v] of Object.entries(seen)) if (now - v.at > NOTIFY_KEEP_MS) delete seen[key]
   writeJSON(NOTIFY_STATE_FILE, { sent, seen })
   try {
@@ -1841,22 +1835,23 @@ async function checkAlerts(accounts) {
 }
 
 // ───────────────────────── 앱 UI: 공용 ─────────────────────────
-async function confirm(title, message, okText = "확인", destructive = false) {
+async function confirm(title, message, okText = t("common.ok"), destructive = false) {
   const a = new Alert()
   a.title = title
   a.message = message || ""
   destructive ? a.addDestructiveAction(okText) : a.addAction(okText)
-  a.addCancelAction("취소")
+  a.addCancelAction(t("common.cancel"))
   return (await a.presentAlert()) === 0
 }
 
-async function prompt(title, message, { placeholder = "", value = "", secure = false, ok = "확인" } = {}) {
+// 글자를 직접 받을 때만 쓰는 작은 입력창. 취소하면 null.
+async function prompt(title, message, { placeholder = "", value = "", secure = false } = {}) {
   const a = new Alert()
   a.title = title
   a.message = message || ""
   secure ? a.addSecureTextField(placeholder, value) : a.addTextField(placeholder, value)
-  a.addAction(ok)
-  a.addCancelAction("취소")
+  a.addAction(t("common.ok"))
+  a.addCancelAction(t("common.cancel"))
   if ((await a.presentAlert()) !== 0) return null
   return a.textFieldValue(0).trim()
 }
@@ -1864,6 +1859,7 @@ async function prompt(title, message, { placeholder = "", value = "", secure = f
 // ───────────────────────── 앱 UI: 페이지 ─────────────────────────
 // 설정·입력도 팝업 대신 메인처럼 '페이지'(표)로 보여준다. 글자를 직접 쳐야 할 때만 작은 입력창을 띄운다.
 // build(page) 가 행을 채운다. 행을 누르면 page.run(fn) 이 작업하고 페이지를 다시 그린다(오류는 맨 위에 표시).
+// title 이 함수면 그릴 때마다 다시 구한다(설정에서 언어를 바꾸면 바로 반영).
 const ACCENT = new Color("#0A84FF")
 
 async function openPage(title, build) {
@@ -1873,15 +1869,19 @@ async function openPage(title, build) {
     closed: false,
     notice: null, // 맨 위에 보여줄 결과·오류 { title, detail, color }
     add: (row) => table.addRow(row),
+    ok(head, detail) {
+      this.notice = { title: head, detail, color: C.ok }
+    },
     async render() {
       if (this.closed) return
       table.removeAllRows()
-      if (title) table.addRow(titleRow(title))
+      const head = typeof title === "function" ? title() : title
+      if (head) table.addRow(titleRow(head))
       if (this.notice) table.addRow(noticeRow(this.notice))
       try {
         await build(this)
       } catch (e) {
-        table.addRow(noticeRow({ title: "불러오지 못했어요", detail: e.message || String(e), color: C.bad }))
+        table.addRow(noticeRow({ title: t("common.loadFailed"), detail: e.message || String(e), color: C.bad }))
       }
       table.reload()
     },
@@ -1891,7 +1891,7 @@ async function openPage(title, build) {
         try {
           await fn()
         } catch (e) {
-          this.notice = { title: "문제가 생겼어요", detail: e.message || String(e), color: C.bad }
+          this.notice = { title: t("common.error"), detail: e.message || String(e), color: C.bad }
         }
         await this.render()
       }
@@ -1900,9 +1900,9 @@ async function openPage(title, build) {
   await page.render()
   await table.present(false)
   page.closed = true
-  return page
 }
 
+// ── 행 ──
 function titleRow(text) {
   const r = new UITableRow()
   r.isHeader = true
@@ -1911,11 +1911,26 @@ function titleRow(text) {
   return r
 }
 
+function headerRow(text) {
+  const r = new UITableRow()
+  r.isHeader = true
+  r.addText(text)
+  return r
+}
+
+// 누를 수 없는 글 한 줄(+설명)
+function textRow(title, subtitle, { height, color, font } = {}) {
+  const r = new UITableRow()
+  r.height = height || (subtitle ? 62 : 48)
+  const c = r.addText(title, subtitle || null)
+  if (color) c.titleColor = color
+  if (font) c.titleFont = font
+  c.subtitleColor = Color.gray()
+  return r
+}
+
 function noticeRow({ title, detail, color }) {
-  const { row, cell } = textRow(title, detail || null, detail ? 64 : 48)
-  cell.titleColor = color || Color.gray()
-  cell.subtitleColor = Color.gray()
-  return row
+  return textRow(title, detail, { height: detail ? 64 : 48, color: color || Color.gray() })
 }
 
 // 회색 안내 문구. 줄 수에 맞춰 높이를 잡는다.
@@ -1935,11 +1950,11 @@ function valueRow(title, value, onSelect, { subtitle, color, valueWidth = 42 } =
   const r = new UITableRow()
   r.dismissOnSelect = false
   r.height = subtitle ? 62 : 48
-  const t = r.addText(title, subtitle || null)
-  t.widthWeight = 100 - valueWidth
+  const c = r.addText(title, subtitle || null)
+  c.widthWeight = 100 - valueWidth
   if (subtitle) {
-    t.subtitleColor = Color.gray()
-    t.subtitleFont = Font.systemFont(12)
+    c.subtitleColor = Color.gray()
+    c.subtitleFont = Font.systemFont(12)
   }
   const v = r.addText(value == null ? "" : String(value))
   v.widthWeight = valueWidth
@@ -1950,20 +1965,38 @@ function valueRow(title, value, onSelect, { subtitle, color, valueWidth = 42 } =
 }
 
 const toggleRow = (title, on, onSelect, subtitle) =>
-  valueRow(title, on ? "켜짐" : "꺼짐", onSelect, { subtitle, color: on ? C.ok : Color.gray(), valueWidth: 20 })
+  valueRow(title, on ? t("common.on") : t("common.off"), onSelect, { subtitle, color: on ? C.ok : Color.gray(), valueWidth: 20 })
 const checkRow = (title, checked, onSelect, subtitle) =>
   valueRow(title, checked ? "✓" : "", onSelect, { subtitle, color: ACCENT, valueWidth: 12 })
 const linkRow = (title, onSelect, subtitle) => valueRow(title, "›", onSelect, { subtitle, valueWidth: 12 })
 
+// 눌러도 표가 닫히지 않는 메뉴 행
+function actionRow(title, onSelect, color) {
+  const r = new UITableRow()
+  r.dismissOnSelect = false
+  const c = r.addText(title)
+  if (color) c.titleColor = color
+  r.onSelect = onSelect
+  return r
+}
+
+function imageRow(img, height) {
+  const r = new UITableRow()
+  r.height = height
+  r.addImage(img).centerAligned()
+  return r
+}
+
+// 서비스 고르기 한 줄: 로고 · 이름(+설명) · ›
 function providerRow(provider, title, subtitle, onSelect) {
   const r = new UITableRow()
   r.dismissOnSelect = false
   r.height = 62
-  const img = logoImage(provider, pal().dark)
-  if (img) r.addImage(img).widthWeight = 12
-  const t = r.addText(title, subtitle)
-  t.widthWeight = 80
-  t.subtitleColor = Color.gray()
+  const img = providerRowLogo(provider)
+  if (img) r.addImage(img).widthWeight = 14
+  const c = r.addText(title, subtitle)
+  c.widthWeight = 78
+  c.subtitleColor = Color.gray()
   const v = r.addText("›")
   v.widthWeight = 8
   v.rightAligned()
@@ -1972,199 +2005,33 @@ function providerRow(provider, title, subtitle, onSelect) {
   return r
 }
 
-// ───────────────────────── 앱 UI: 연결 설정 ─────────────────────────
-async function serverPage() {
-  // 저장 전 값은 페이지 안에만 두고, 연결이 확인되면 저장한다
-  const draft = {
-    server: Keychain.contains(KC_SERVER) ? Keychain.get(KC_SERVER) : "",
-    apiKey: Keychain.contains(KC_KEY) ? Keychain.get(KC_KEY) : "",
+// '복사한 값 붙여넣기' + '직접 입력' 두 줄. submit(값) 은 빈 값이면 emptyMessage 로 알린다.
+// 클립보드에 글자가 없으면 Pasteboard.paste() 는 null 이므로 빈 글자로 바꿔 넘긴다(취소와 구분).
+function pasteRows(page, { pasteTitle, promptTitle, promptHint, secure, emptyMessage, submit }) {
+  const send = async (raw) => {
+    if (raw == null) return // 입력창에서 취소
+    const value = String(raw).trim()
+    if (!value) throw new Error(emptyMessage)
+    await submit(value)
   }
-  let connected = false
-  await openPage("서버 연결", async (page) => {
-    page.add(noteRow("직접 띄운 사용량 서버에 연결해요. 서버를 설치하는 방법은 저장소의 README에 있어요."))
-    page.add(headerRow("서버"))
-    page.add(valueRow("주소", draft.server || "입력", page.run(async () => {
-      const v = await prompt("서버 주소", "예) https://ai.example.com", { value: draft.server, placeholder: "https://" })
-      if (v != null) draft.server = v.replace(/\/+$/, "")
-    }), { valueWidth: 60 }))
-    page.add(valueRow("API 키", draft.apiKey ? "입력됨" : "입력", page.run(async () => {
-      const v = await prompt("API 키", "서버에 설정한 AIUSAGE_API_KEY 값이에요.", { secure: true, value: draft.apiKey })
-      if (v != null) draft.apiKey = v
-    })))
-    page.add(actionRow("연결 확인하고 저장", page.run(async () => {
-      if (!draft.server || !draft.apiKey) throw new Error("주소와 API 키를 모두 넣어 주세요.")
-      await serverApi(draft, "GET", "/v1/accounts")
-      Keychain.set(KC_SERVER, draft.server)
-      Keychain.set(KC_KEY, draft.apiKey)
-      setMode("server")
-      connected = true
-      page.notice = { title: "연결됐어요", detail: "이 화면을 닫으면 서버의 계정 목록을 보여 드려요.", color: C.ok }
-    }), ACCENT))
-  })
-  return connected
-}
-
-const AG_CLIENT_HELP =
-  "PC에 설치한 Antigravity 앱의 resources/app/out/main.js 파일에서 두 값을 찾아 넣어 주세요.\n• Client ID: ….apps.googleusercontent.com 으로 끝나는 값\n• Client Secret: GOCSPX- 로 시작하는 값"
-
-async function antigravityPage() {
-  await openPage("Antigravity 로그인 설정", async (page) => {
-    let cur = {}
-    try {
-      cur = JSON.parse(Keychain.contains(KC_AG_CLIENT) ? Keychain.get(KC_AG_CLIENT) : "{}") || {}
-    } catch (e) {}
-    const save = (patch) => Keychain.set(KC_AG_CLIENT, JSON.stringify({ ...cur, ...patch }))
-    page.add(noteRow(AG_CLIENT_HELP))
-    page.add(headerRow("Google OAuth 클라이언트"))
-    page.add(valueRow("Client ID", cur.id ? `${cur.id.slice(0, 12)}…` : "입력", page.run(async () => {
-      const v = await prompt("Client ID", "….apps.googleusercontent.com 으로 끝나는 값이에요.", { value: cur.id || "" })
-      if (v != null) save({ id: v })
-    })))
-    page.add(valueRow("Client Secret", cur.secret ? "입력됨" : "입력", page.run(async () => {
-      const v = await prompt("Client Secret", "GOCSPX- 로 시작하는 값이에요.", { secure: true, value: cur.secret || "" })
-      if (v != null) save({ secret: v })
-    })))
-    if (agClient()) page.add(noticeRow({ title: "준비됐어요", detail: "이제 Antigravity 계정을 추가할 수 있어요.", color: C.ok }))
-  })
-  return !!agClient()
-}
-
-// ───────────────────────── 앱 UI: 계정 추가·로그인 ─────────────────────────
-const PROVIDER_DESC = { claude: "사용량 · 초기화권 · 플랜", codex: "사용량 · 초기화권 · 플랜", antigravity: "모델 그룹별 사용량" }
-
-const LOGIN_GUIDE = {
-  claude: "로그인하고 승인하면 코드가 나와요. 'Copy Code'로 복사한 뒤 돌아와서 '붙여넣기'를 누르세요.",
-  codex: "ChatGPT로 로그인하면 '연결할 수 없음' 페이지가 떠요. 정상이에요. 주소창의 주소를 통째로 복사한 뒤 돌아와서 '붙여넣기'를 누르세요.",
-  antigravity: "Antigravity에서 쓰는 Google 계정으로 로그인하면 열리지 않는 페이지로 이동해요. 정상이에요. 주소창의 주소를 통째로 복사한 뒤 돌아와서 '붙여넣기'를 누르세요.",
-}
-
-const SESSION_KEY_HELP =
-  "초기화권은 claude.ai 웹에서만 확인할 수 있어서 sessionKey가 필요해요. PC 브라우저로 claude.ai에 로그인한 뒤 개발자 도구 → Application → Cookies → https://claude.ai 에서 'sessionKey' 값(sk-ant-…)을 복사해 주세요."
-
-async function addAccountPage() {
-  let added = false
-  await openPage("계정 추가", async (page) => {
-    const { providers } = await api("GET", "/v1/providers")
-    page.add(headerRow("어떤 서비스를 추가할까요?"))
-    for (const p of providers) {
-      page.add(providerRow(p.id, p.name, p.configured ? PROVIDER_DESC[p.id] || "" : "설정이 필요해요", page.run(async () => {
-        if (!p.configured) {
-          if (!(getConfig().device && p.id === "antigravity")) throw new Error(p.reason)
-          if (!(await antigravityPage())) return
-        }
-        if (await loginPage(p.id)) {
-          added = true
-          page.notice = { title: "계정을 추가했어요", detail: "이 화면을 닫으면 목록에 보여요.", color: C.ok }
-        }
-      })))
-    }
-  })
-  return added
-}
-
-// 새 계정 추가 또는 기존 계정 다시 로그인(accountId). 끝나면 결과를 페이지 맨 위에 보여준다.
-async function loginPage(provider, { accountId = null } = {}) {
-  const st = { label: "", method: "oauth", login: null, done: null }
-
-  const finish = (page, acc) => {
-    st.done = acc
-    const status = acc.status === "ok" ? "" : ` · 상태: ${STATUS_TEXT[acc.status] || acc.status}`
-    page.notice = { title: accountId ? "다시 로그인했어요" : "계정을 추가했어요",
-      detail: `${acc.label}${acc.email ? ` (${acc.email})` : ""}${status} · 닫으면 목록으로 돌아가요.`, color: C.ok }
-  }
-
-  const submitCode = async (page, raw) => {
-    if (raw == null) return
-    if (!st.login) throw new Error("먼저 '1. 로그인 페이지 열기'로 로그인해 주세요.")
-    const input = String(raw).trim()
-    if (!input) throw new Error("클립보드가 비어 있어요. 로그인 페이지에서 다시 복사해 주세요.")
-    try {
-      finish(page, await api("POST", `/v1/logins/${st.login.login_id}/complete`, { input }, 60))
-    } catch (e) {
-      if (/만료/.test(e.message)) st.login = null // 로그인 세션이 끝났으면 처음부터
-      throw e
-    }
-  }
-
-  const submitKey = async (page, raw) => {
-    if (raw == null) return
-    const key = String(raw).trim()
-    if (!key) throw new Error("클립보드가 비어 있어요. sessionKey를 다시 복사해 주세요.")
-    finish(page, await api("POST", "/v1/accounts", { provider, session_key: key, label: st.label || undefined }, 60))
-  }
-
-  await openPage(accountId ? `${providerName(provider)} 다시 로그인` : `${providerName(provider)} 계정 추가`, async (page) => {
-    if (st.done) return
-    if (!accountId) {
-      page.add(headerRow("이름"))
-      page.add(valueRow("위젯에 보일 이름", st.label || "이메일 앞부분", page.run(async () => {
-        const v = await prompt("이름", "비워 두면 이메일 앞부분을 써요.", { value: st.label, placeholder: "예) 개인" })
-        if (v != null) st.label = v
-      }), { valueWidth: 50 }))
-    }
-    if (provider === "claude" && !accountId) {
-      page.add(headerRow("추가 방식"))
-      page.add(checkRow("OAuth 로그인 (추천)", st.method === "oauth", page.run(() => (st.method = "oauth")),
-        "사용량과 플랜을 안정적으로 가져와요. 초기화권은 나중에 sessionKey로 더할 수 있어요."))
-      page.add(checkRow("sessionKey", st.method === "session_key", page.run(() => (st.method = "session_key")),
-        "사용량과 초기화권까지 가져와요. claude.ai 쿠키 값이 필요해요."))
-    }
-    if (st.method === "session_key") {
-      page.add(headerRow("sessionKey"))
-      page.add(noteRow(SESSION_KEY_HELP))
-      page.add(actionRow("복사한 sessionKey 붙여넣기", page.run(() => submitKey(page, Pasteboard.paste())), ACCENT))
-      page.add(actionRow("직접 입력", page.run(async () => submitKey(page, await prompt("sessionKey", "sk-ant- 로 시작하는 값이에요.", { secure: true })))))
-      return
-    }
-    page.add(headerRow("로그인"))
-    page.add(noteRow(LOGIN_GUIDE[provider]))
-    page.add(actionRow("1. 로그인 페이지 열기", page.run(async () => {
-      if (!st.login) st.login = await api("POST", "/v1/logins", { provider, label: st.label || undefined, account_id: accountId || undefined })
-      Safari.open(st.login.authorize_url)
-    }), ACCENT))
-    page.add(actionRow("2. 복사한 값 붙여넣기", page.run(() => submitCode(page, Pasteboard.paste())), ACCENT))
-    page.add(actionRow("직접 입력", page.run(async () => submitCode(page, await prompt("직접 입력", st.login ? st.login.input_hint : "")))))
-  })
-  return !!st.done
-}
-
-// 기존 Claude 계정에 sessionKey 를 넣거나 바꾸거나 지운다.
-// OAuth 가 없는 계정은 sessionKey 가 유일한 인증이라 지울 수 없다(canDelete).
-async function sessionKeyPage(accountId, { hasKey = false, canDelete = false } = {}) {
-  let done = false
-  await openPage("sessionKey", async (page) => {
-    if (done) return
-    page.add(noteRow(SESSION_KEY_HELP))
-    const submit = async (raw) => {
-      if (raw == null) return
-      const key = String(raw).trim()
-      if (!key) throw new Error("클립보드가 비어 있어요. sessionKey를 다시 복사해 주세요.")
-      await api("PATCH", `/v1/accounts/${accountId}`, { session_key: key }, 60)
-      done = true
-      page.notice = { title: "저장했어요", detail: "초기화권을 확인했어요. 닫으면 계정 화면으로 돌아가요.", color: C.ok }
-    }
-    page.add(headerRow(hasKey ? "새 값으로 바꾸기" : "추가하기"))
-    page.add(actionRow("복사한 sessionKey 붙여넣기", page.run(() => submit(Pasteboard.paste())), ACCENT))
-    page.add(actionRow("직접 입력", page.run(async () => submit(await prompt("sessionKey", "sk-ant- 로 시작하는 값이에요.", { secure: true })))))
-    if (hasKey && canDelete) {
-      page.add(actionRow("sessionKey 삭제", page.run(async () => {
-        if (!(await confirm("sessionKey 삭제", "초기화권이 더 이상 표시되지 않아요.", "삭제", true))) return
-        await api("PATCH", `/v1/accounts/${accountId}`, { session_key: "" })
-        done = true
-        page.notice = { title: "삭제했어요", detail: "닫으면 계정 화면으로 돌아가요.", color: C.ok }
-      }), C.bad))
-    }
-  })
-  return done
+  page.add(actionRow(pasteTitle, page.run(() => send(Pasteboard.paste() ?? "")), ACCENT))
+  page.add(actionRow(t("common.typeIn"), page.run(async () => send(await prompt(promptTitle, promptHint, { secure })))))
 }
 
 // ───────────────────────── 앱 UI: 카드 그리기 ─────────────────────────
 // UITable 에는 진행 막대가 없어서 카드 전체를 이미지로 그려 행에 넣는다.
-function appPalette() {
+// DrawContext 이미지에는 dynamic 색이 적용되지 않으므로 지금 모드에 맞는 색을 고른다.
+let _pal = null
+function pal() {
+  if (_pal) return _pal
   const dark = Device.isUsingDarkAppearance()
-  return dark
+  return (_pal = dark
     ? { dark, text: new Color("#F2F2F7"), sub: new Color("#98989F"), track: new Color("#8E8E93", 0.3), pill: new Color("#787880", 0.32) }
-    : { dark, text: new Color("#1C1C1E"), sub: new Color("#6E6E73"), track: new Color("#8E8E93", 0.2), pill: new Color("#787880", 0.14) }
+    : { dark, text: new Color("#1C1C1E"), sub: new Color("#6E6E73"), track: new Color("#8E8E93", 0.2), pill: new Color("#787880", 0.14) })
+}
+
+function brandHex(provider) {
+  return (PROVIDER_STYLE[provider] || {}).color || "#8E8E93"
 }
 
 function cardWidth() {
@@ -2214,17 +2081,34 @@ function textW(text, size, weight = 400) {
   return v != null ? Math.ceil(v) : estWidth(text, size)
 }
 
-// 카드·상세에 쓰는 글자들을 미리 잰다. style 은 한도 줄 모양(LINE_STYLE 의 키).
-function measureItemsFor(acc, usage, nameSize, nameWeight, style) {
-  const items = [{ text: acc.label, size: nameSize, weight: nameWeight }]
-  const plan = planLabel((usage && usage.plan) || acc.plan, acc.provider)
-  if (plan) items.push({ text: plan, size: 10, weight: 700 })
-  for (const pill of statusPills(usage || acc, { enabled: acc.enabled })) items.push({ text: pill.text, size: 11, weight: 600 })
+const PILL_FONT = [11, 600]
+
+// 계정 머리(로고 · 이름 + 플랜 배지 · 서비스(이메일) · 오른쪽 배지)와 한도 줄의 모양
+const HEAD_STYLE = {
+  card: { logo: 24, logoY: 6, x: 34, name: [17, 600], nameY: 2, lineY: 23, line: 12, pillY: 10, height: 44 },
+  detail: { logo: 40, logoY: 8, x: 52, name: [22, 700], nameY: 6, lineY: 36, line: 13, pillY: 18, height: 64 },
+}
+// 글자 크기가 달라도 밑줄(baseline)이 맞도록 y 를 잡았다.
+const LINE_STYLE = {
+  card: { title: [13, 400], titleY: 2, pct: 15, time: 12, timeY: 3, barY: 23, barH: 7 },
+  detail: { title: [15, 500], titleY: 4, pct: 18, time: 13, timeY: 7, barY: 30, barH: 8 },
+}
+
+// 카드·상세에 쓰는 글자들을 미리 잰다. style: "card" | "detail"
+function measureItemsFor(acc, usage, style) {
+  const u = usage || acc
+  const h = HEAD_STYLE[style]
   const s = LINE_STYLE[style]
-  for (const w of (usage || acc).windows || []) {
+  const items = [{ text: acc.label, size: h.name[0], weight: h.name[1] }]
+  const plan = planLabel(u.plan || acc.plan, acc.provider)
+  if (plan) items.push({ text: plan, size: 10, weight: 700 })
+  for (const pill of statusPills(u, { enabled: acc.enabled })) items.push({ text: pill.text, size: PILL_FONT[0], weight: PILL_FONT[1] })
+  for (const w of u.windows || []) {
     items.push({ text: windowTitle(w), size: s.title[0], weight: s.title[1] }, { text: fmtPct(w.used_percent), size: s.pct, weight: 600 })
-    for (const t of timeCandidates(w.resets_at)) items.push({ text: t, size: s.time, weight: 400 })
+    for (const c of timeCandidates(w.resets_at)) items.push({ text: c, size: s.time, weight: 400 })
   }
+  if (style === "detail")
+    for (const item of (u.reset_credits && u.reset_credits.items) || []) items.push({ text: creditLeft(item).text, size: PILL_FONT[0], weight: PILL_FONT[1] })
   return items
 }
 
@@ -2237,19 +2121,20 @@ function drawTextAt(ctx, text, x, y, w, h, font, color, align = "left") {
   ctx.drawTextInRect(String(text), new Rect(x, y, w, h))
 }
 
-function drawLogo(ctx, provider, x, y, size, pal) {
-  const img = logoImage(provider, pal.dark)
+function drawLogo(ctx, provider, x, y, size) {
+  const img = logoImage(provider, pal().dark)
   if (img) ctx.drawImageInRect(img, new Rect(x, y, size, size))
 }
 
 // pills(왼쪽→오른쪽 순서)를 right 에 붙여 그리고, 남은 오른쪽 경계를 돌려준다.
-function drawPills(ctx, pills, right, y, pal) {
+function drawPills(ctx, pills, right, y) {
+  const p = pal()
   let x = right
-  for (const p of [...pills].reverse()) {
-    const w = textW(p.text, 11, 600) + 14
+  for (const pill of [...pills].reverse()) {
+    const w = textW(pill.text, PILL_FONT[0], PILL_FONT[1]) + 14
     x -= w
-    fillRound(ctx, new Rect(x, y, w, 20), 10, pal.pill)
-    drawTextAt(ctx, p.text, x, y + 3, w, 16, Font.semiboldSystemFont(11), p.muted ? pal.sub : p.color || pal.text, "center")
+    fillRound(ctx, new Rect(x, y, w, 20), 10, p.pill)
+    drawTextAt(ctx, pill.text, x, y + 3, w, 16, Font.semiboldSystemFont(PILL_FONT[0]), pill.muted ? p.sub : pill.color || p.text, "center")
     x -= 6
   }
   return x
@@ -2265,41 +2150,43 @@ function drawPlanBadge(ctx, provider, plan, name, maxRight) {
   const x = name.x + textW(name.text, name.size, name.weight) + 7
   if (x + w > maxRight) return
   const top = name.y + (name.size * 1.19 - h) / 2 + 1
-  const brand = (PROVIDER_STYLE[provider] || {}).color || "#8E8E93"
+  const brand = brandHex(provider)
   fillRound(ctx, new Rect(x, top, w, h), 5, new Color(brand, pal().dark ? 0.28 : 0.15))
   drawTextAt(ctx, label, x, top + 2.5, w, h - 2, Font.boldSystemFont(10), new Color(brand), "center")
 }
 
-let _pal = null
-function pal() {
-  return _pal || (_pal = appPalette())
-}
-
-// 앱의 한도 한 줄: 왼쪽 이름, 오른쪽 '남은 시간  퍼센트', 아래 막대.
-// 글자 크기가 달라도 밑줄(baseline)이 맞도록 y 를 잡았다.
-const LINE_STYLE = {
-  card: { title: [13, 400], titleY: 2, pct: 15, time: 12, timeY: 3, barY: 23, barH: 7 },
-  detail: { title: [15, 500], titleY: 4, pct: 18, time: 13, timeY: 7, barY: 30, barH: 8 },
+// 계정 머리. 카드와 상세 화면이 크기만 다르게 같이 쓴다.
+function drawAccountHead(ctx, acc, { plan, pills, dim }, W, style) {
+  const p = pal()
+  const h = HEAD_STYLE[style]
+  const [size, weight] = h.name
+  const nameFont = weight >= 700 ? Font.boldSystemFont(size) : Font.semiboldSystemFont(size)
+  drawLogo(ctx, acc.provider, 0, h.logoY, h.logo)
+  const right = drawPills(ctx, pills, W, h.pillY)
+  drawTextAt(ctx, acc.label, h.x, h.nameY, right - h.x - 6, size + 6, nameFont, dim ? p.sub : p.text)
+  drawPlanBadge(ctx, acc.provider, plan, { text: acc.label, x: h.x, y: h.nameY, size, weight }, right - 6)
+  drawTextAt(ctx, providerLine(acc), h.x, h.lineY, right - h.x - 6, h.line + 5, Font.systemFont(h.line), p.sub)
 }
 
 // 남은 시간 표기 후보(긴 것부터). 이름과 겹치면 짧은 것으로 바꾼다.
 function timeCandidates(iso) {
   if (!iso) return []
   const left = fmtDuration(iso)
-  return left ? [`${left} 후 초기화`, `${left} 후`] : ["곧 초기화"]
+  return left ? [t("reset.in", { t: left }), t("reset.inShort", { t: left })] : [t("reset.soon")]
 }
 
-function drawWindowLine(ctx, w, y, width, dim, p, style) {
+// 앱의 한도 한 줄: 왼쪽 이름, 오른쪽 '남은 시간  퍼센트', 아래 막대.
+function drawWindowLine(ctx, w, y, width, dim, style) {
+  const p = pal()
   const s = LINE_STYLE[style]
   const pct = w.used_percent
   const pctText = fmtPct(pct)
   const title = windowTitle(w)
   const titleFont = s.title[1] >= 500 ? Font.mediumSystemFont(s.title[0]) : Font.systemFont(s.title[0])
-  const pctFont = Font.semiboldSystemFont(s.pct)
-  drawTextAt(ctx, pctText, width - 80, y, 80, s.pct + 6, pctFont, pctTextColor(pct, dim, p.text), "right")
+  drawTextAt(ctx, pctText, width - 80, y, 80, s.pct + 6, Font.semiboldSystemFont(s.pct), pctTextColor(pct, dim, p.text), "right")
   const timeRight = width - textW(pctText, s.pct, 600) - 8
   const room = timeRight - textW(title, s.title[0], s.title[1]) - 14
-  const time = timeCandidates(w.resets_at).find((t) => textW(t, s.time, 400) <= room)
+  const time = timeCandidates(w.resets_at).find((c) => textW(c, s.time, 400) <= room)
   const titleRight = time ? timeRight - textW(time, s.time, 400) - 10 : timeRight
   drawTextAt(ctx, title, 0, y + s.titleY, titleRight, s.title[0] + 6, titleFont, style === "card" ? p.sub : p.text)
   if (time) drawTextAt(ctx, time, 0, y + s.timeY, timeRight, s.time + 5, Font.systemFont(s.time), new Color(p.sub.hex, 0.85), "right")
@@ -2307,25 +2194,30 @@ function drawWindowLine(ctx, w, y, width, dim, p, style) {
 }
 
 // 메인 화면의 계정 카드. 앱은 공간이 넓어 한도마다 한 줄씩(가로 전체) 모두 보여준다.
-const CARD_HEAD_H = 44
 const CARD_ROW_H = 42
 
 function accountCard(acc, enabled) {
   const p = pal()
   const W = cardWidth()
   const ws = acc.windows || []
+  const head = HEAD_STYLE.card.height
+  const line = LINE_STYLE.card
   // 마지막 줄은 막대 아래 여백 없이 끝낸다
-  const H = CARD_HEAD_H + (ws.length ? (ws.length - 1) * CARD_ROW_H + LINE_STYLE.card.barY + LINE_STYLE.card.barH + 2 : 36)
+  const H = head + (ws.length ? (ws.length - 1) * CARD_ROW_H + line.barY + line.barH + 2 : 36)
   const ctx = newCtx(W, H)
   const dim = acc.stale || acc.status === "needs_login"
-  drawLogo(ctx, acc.provider, 0, 6, 24, p)
-  const right = drawPills(ctx, statusPills(acc, { enabled }), W, 10, p)
-  drawTextAt(ctx, acc.label, 34, 2, right - 40, 22, Font.semiboldSystemFont(17), dim ? p.sub : p.text)
-  drawPlanBadge(ctx, acc.provider, acc.plan, { text: acc.label, x: 34, y: 2, size: 17, weight: 600 }, right - 6)
-  drawTextAt(ctx, providerLine(acc), 34, 23, right - 40, 16, Font.systemFont(12), p.sub)
-  if (!ws.length) drawTextAt(ctx, acc.error || STATUS_TEXT[acc.status] || "데이터 없음", 0, CARD_HEAD_H + 2, W, 32, Font.systemFont(13), p.sub)
-  ws.forEach((w, i) => drawWindowLine(ctx, w, CARD_HEAD_H + i * CARD_ROW_H, W, dim, p, "card"))
+  drawAccountHead(ctx, acc, { plan: acc.plan, pills: statusPills(acc, { enabled }), dim }, W, "card")
+  if (!ws.length) drawTextAt(ctx, acc.error || statusText(acc.status) || t("common.noData"), 0, head + 2, W, 32, Font.systemFont(13), p.sub)
+  ws.forEach((w, i) => drawWindowLine(ctx, w, head + i * CARD_ROW_H, W, dim, "card"))
   return { image: ctx.getImage(), height: H }
+}
+
+// 상세 화면 맨 위 요약
+function detailHeaderImage(acc, usage) {
+  const W = cardWidth()
+  const ctx = newCtx(W, HEAD_STYLE.detail.height)
+  drawAccountHead(ctx, acc, { plan: usage.plan || acc.plan, pills: statusPills(usage, { enabled: acc.enabled }) }, W, "detail")
+  return ctx.getImage()
 }
 
 // 상세 화면의 한도 한 줄. 막대 아래에는 초기화 날짜·시각을 적는다.
@@ -2333,81 +2225,198 @@ function windowRowImage(w, dim) {
   const p = pal()
   const W = cardWidth()
   const ctx = newCtx(W, 58)
-  drawWindowLine(ctx, w, 0, W, dim, p, "detail")
-  drawTextAt(ctx, w.resets_at ? `${fmtDate(w.resets_at)} 초기화` : "초기화 시각 정보 없음", 0, 42, W, 16, Font.systemFont(11), p.sub)
+  drawWindowLine(ctx, w, 0, W, dim, "detail")
+  drawTextAt(ctx, w.resets_at ? t("detail.resetAt", { date: fmtDate(w.resets_at) }) : t("detail.noReset"), 0, 42, W, 16, Font.systemFont(11), p.sub)
   return ctx.getImage()
 }
 
-// 상세 화면 맨 위 요약
-function detailHeaderImage(acc, usage) {
-  const p = pal()
-  const W = cardWidth()
-  const ctx = newCtx(W, 64)
-  drawLogo(ctx, acc.provider, 0, 8, 40, p)
-  const right = drawPills(ctx, statusPills(usage, { enabled: acc.enabled }), W, 18, p)
-  drawTextAt(ctx, acc.label, 52, 6, right - 56, 28, Font.boldSystemFont(22), p.text)
-  drawPlanBadge(ctx, acc.provider, usage.plan || acc.plan, { text: acc.label, x: 52, y: 6, size: 22, weight: 700 }, right - 6)
-  drawTextAt(ctx, providerLine(acc), 52, 36, right - 56, 18, Font.systemFont(13), p.sub)
-  return ctx.getImage()
+// 초기화권 남은 기간 배지. 하루 이상 남으면 일 단위로만 (예: 4일 남음), 3일 안이면 경고색.
+function creditLeft(item) {
+  const ms = item.expires_at ? new Date(item.expires_at).getTime() - Date.now() : null
+  const left = fmtDuration(item.expires_at)
+  const text = ms == null ? t("credit.noExpiry")
+    : ms >= DAY_MS ? t("credit.daysLeft", { n: Math.floor(ms / DAY_MS) })
+    : left ? t("credit.left", { t: left }) : t("credit.soon")
+  return ms != null && ms < 3 * DAY_MS ? { text, color: C.warn } : { text, muted: true }
 }
 
 // 상세 화면의 초기화권 한 장
 function resetCreditImage(item, index, provider) {
   const p = pal()
   const W = cardWidth()
-  const H = 58
-  const ctx = newCtx(W, H)
-  const brand = new Color((PROVIDER_STYLE[provider] || {}).color || "#8E8E93")
+  const ctx = newCtx(W, 58)
+  const brand = brandHex(provider)
   // 왼쪽 번호 칩
-  fillRound(ctx, new Rect(0, 11, 36, 36), 10, new Color(brand.hex, p.dark ? 0.28 : 0.14))
-  drawTextAt(ctx, String(index + 1), 0, 19, 36, 20, Font.boldSystemFont(16), brand, "center")
-  // 남은 기간 배지
-  // 하루 이상 남으면 일 단위로만 (예: 4일 남음)
-  const ms = item.expires_at ? new Date(item.expires_at).getTime() - Date.now() : null
-  const left = fmtDuration(item.expires_at)
-  const leftText = ms == null ? "만료 없음" : ms >= DAY_MS ? `${Math.floor(ms / DAY_MS)}일 남음` : left ? `${left} 남음` : "곧 만료"
-  const soon = ms != null && ms < 3 * DAY_MS
-  const right = drawPills(ctx, [soon ? { text: leftText, color: C.warn } : { text: leftText, muted: true }], W, 19, p)
+  fillRound(ctx, new Rect(0, 11, 36, 36), 10, new Color(brand, p.dark ? 0.28 : 0.14))
+  drawTextAt(ctx, String(index + 1), 0, 19, 36, 20, Font.boldSystemFont(16), new Color(brand), "center")
+  const right = drawPills(ctx, [creditLeft(item)], W, 19)
   // 제목과 날짜
-  const title = item.title || "사용량 초기화권"
-  drawTextAt(ctx, title, 48, 10, right - 52, 20, Font.semiboldSystemFont(15), p.text)
-  const dates = [item.expires_at ? `${fmtDay(item.expires_at)} 만료` : null, item.granted_at ? `${fmtDay(item.granted_at)} 지급` : null]
+  drawTextAt(ctx, item.title || t("credit.title"), 48, 10, right - 52, 20, Font.semiboldSystemFont(15), p.text)
+  const dates = [item.expires_at && t("credit.expires", { date: fmtDay(item.expires_at) }), item.granted_at && t("credit.granted", { date: fmtDay(item.granted_at) })]
     .filter(Boolean)
     .join("  ·  ")
   drawTextAt(ctx, dates || item.description || "", 48, 32, right - 52, 16, Font.systemFont(12), p.sub)
   return ctx.getImage()
 }
 
-function headerRow(text) {
-  const r = new UITableRow()
-  r.isHeader = true
-  r.addText(text)
-  return r
+// 서비스 고르기 줄의 로고. 표 칸은 이미지를 칸 크기에 맞춰 늘리므로,
+// 오른쪽에 투명한 여백을 둔 그림을 만들어 로고는 작게, 이름과는 떨어지게 한다.
+function providerRowLogo(provider) {
+  const ctx = newCtx(46, 30)
+  drawLogo(ctx, provider, 0, 3, 24)
+  return ctx.getImage()
 }
 
-function textRow(title, subtitle, height = 54) {
-  const r = new UITableRow()
-  r.height = height
-  const c = r.addText(title, subtitle)
-  return { row: r, cell: c }
+// ───────────────────────── 앱 UI: 연결 설정 ─────────────────────────
+async function serverPage() {
+  // 저장 전 값은 페이지 안에만 두고, 연결이 확인되면 저장한다
+  const draft = { server: kcGet(KC_SERVER, ""), apiKey: kcGet(KC_KEY, "") }
+  let connected = false
+  await openPage(t("server.title"), async (page) => {
+    page.add(noteRow(t("server.note")))
+    page.add(headerRow(t("server.section")))
+    page.add(valueRow(t("server.address"), draft.server || t("common.enter"), page.run(async () => {
+      const v = await prompt(t("server.addressPrompt"), t("server.addressExample"), { value: draft.server, placeholder: "https://" })
+      if (v != null) draft.server = v.replace(/\/+$/, "")
+    }), { valueWidth: 60 }))
+    page.add(valueRow(t("server.apiKey"), draft.apiKey ? t("common.set") : t("common.enter"), page.run(async () => {
+      const v = await prompt(t("server.apiKey"), t("server.apiKeyHelp"), { secure: true, value: draft.apiKey })
+      if (v != null) draft.apiKey = v
+    })))
+    page.add(actionRow(t("server.save"), page.run(async () => {
+      if (!draft.server || !draft.apiKey) throw new Error(t("server.missing"))
+      await serverApi(draft, "GET", "/v1/accounts")
+      Keychain.set(KC_SERVER, draft.server)
+      Keychain.set(KC_KEY, draft.apiKey)
+      setMode("server")
+      connected = true
+      page.ok(t("server.connected"), t("server.connectedDetail"))
+    }), ACCENT))
+  })
+  return connected
 }
 
-// 눌러도 표가 닫히지 않는 메뉴 행
-function actionRow(title, onSelect, color) {
-  const r = new UITableRow()
-  r.dismissOnSelect = false
-  const c = r.addText(title)
-  if (color) c.titleColor = color
-  r.onSelect = onSelect
-  return r
+async function antigravityPage() {
+  await openPage(t("ag.title"), async (page) => {
+    const cur = kcJSON(KC_AG_CLIENT, {})
+    const save = (patch) => Keychain.set(KC_AG_CLIENT, JSON.stringify({ ...cur, ...patch }))
+    page.add(noteRow(t("ag.help")))
+    page.add(headerRow(t("ag.section")))
+    page.add(valueRow("Client ID", cur.id ? `${cur.id.slice(0, 12)}…` : t("common.enter"), page.run(async () => {
+      const v = await prompt("Client ID", t("ag.idHelp"), { value: cur.id || "" })
+      if (v != null) save({ id: v })
+    })))
+    page.add(valueRow("Client Secret", cur.secret ? t("common.set") : t("common.enter"), page.run(async () => {
+      const v = await prompt("Client Secret", t("ag.secretHelp"), { secure: true, value: cur.secret || "" })
+      if (v != null) save({ secret: v })
+    })))
+    if (agClient()) page.add(noticeRow({ title: t("ag.ready"), detail: t("ag.readyDetail"), color: C.ok }))
+  })
+  return !!agClient()
 }
 
-function imageRow(img, height) {
-  const r = new UITableRow()
-  r.height = height
-  const c = r.addImage(img)
-  c.centerAligned()
-  return r
+// ───────────────────────── 앱 UI: 계정 추가·로그인 ─────────────────────────
+async function addAccountPage() {
+  let added = false
+  await openPage(t("add.title"), async (page) => {
+    const { providers } = await api("GET", "/v1/providers")
+    page.add(headerRow(t("add.which")))
+    for (const p of providers) {
+      page.add(providerRow(p.id, p.name, p.configured ? t(`provider.desc.${p.id}`) : t("provider.needsSetup"), page.run(async () => {
+        if (!p.configured) {
+          if (!(getConfig().device && p.id === "antigravity")) throw new Error(p.reason)
+          if (!(await antigravityPage())) return
+        }
+        if (await loginPage(p.id)) {
+          added = true
+          page.ok(t("add.done"), t("add.doneDetail"))
+        }
+      })))
+    }
+  })
+  return added
+}
+
+// 새 계정 추가 또는 기존 계정 다시 로그인(accountId). 끝나면 결과를 페이지 맨 위에 보여준다.
+async function loginPage(provider, { accountId = null } = {}) {
+  const st = { label: "", method: "oauth", login: null, done: false }
+  const name = providerName(provider)
+
+  const finish = (page, acc) => {
+    st.done = true
+    const status = acc.status === "ok" ? "" : t("login.status", { status: statusText(acc.status) })
+    page.ok(accountId ? t("login.relogged") : t("add.done"), `${acc.label}${acc.email ? ` (${acc.email})` : ""}${status}${t("login.closeToList")}`)
+  }
+
+  const submitCode = async (page, input) => {
+    if (!st.login) throw new Error(t("login.needOpenFirst"))
+    try {
+      finish(page, await api("POST", `/v1/logins/${st.login.login_id}/complete`, { input }, 60))
+    } catch (e) {
+      if (e.status === 404) st.login = null // 로그인 세션이 끝났으면 처음부터
+      throw e
+    }
+  }
+
+  await openPage(t(accountId ? "login.titleRelogin" : "login.titleAdd", { provider: name }), async (page) => {
+    if (st.done) return
+    if (!accountId) {
+      page.add(headerRow(t("common.name")))
+      page.add(valueRow(t("login.nameRow"), st.label || t("login.nameDefault"), page.run(async () => {
+        const v = await prompt(t("common.name"), t("login.namePrompt"), { value: st.label, placeholder: t("login.namePlaceholder") })
+        if (v != null) st.label = v
+      }), { valueWidth: 50 }))
+    }
+    if (provider === "claude" && !accountId) {
+      page.add(headerRow(t("login.method")))
+      page.add(checkRow(t("login.oauth"), st.method === "oauth", page.run(() => (st.method = "oauth")), t("login.oauthDesc")))
+      page.add(checkRow("sessionKey", st.method === "session_key", page.run(() => (st.method = "session_key")), t("login.skDesc")))
+    }
+    if (st.method === "session_key") {
+      page.add(headerRow("sessionKey"))
+      page.add(noteRow(t("sk.help")))
+      pasteRows(page, { pasteTitle: t("sk.paste"), promptTitle: "sessionKey", promptHint: t("sk.prompt"), secure: true,
+        emptyMessage: t("sk.clipEmpty"),
+        submit: async (key) => finish(page, await api("POST", "/v1/accounts", { provider, session_key: key, label: st.label || undefined }, 60)) })
+      return
+    }
+    page.add(headerRow(t("login.section")))
+    page.add(noteRow(t(`login.guide.${provider}`)))
+    page.add(actionRow(t("login.open"), page.run(async () => {
+      if (!st.login) st.login = await api("POST", "/v1/logins", { provider, label: st.label || undefined, account_id: accountId || undefined })
+      Safari.open(st.login.authorize_url)
+    }), ACCENT))
+    pasteRows(page, { pasteTitle: t("login.paste"), promptTitle: t("common.typeIn"), promptHint: t(`login.hint.${provider}`),
+      emptyMessage: t("login.clipEmpty"), submit: (input) => submitCode(page, input) })
+  })
+  return st.done
+}
+
+// 기존 Claude 계정에 sessionKey 를 넣거나 바꾸거나 지운다.
+// OAuth 가 없는 계정은 sessionKey 가 유일한 인증이라 지울 수 없다(canDelete).
+async function sessionKeyPage(accountId, { hasKey = false, canDelete = false } = {}) {
+  let done = false
+  await openPage("sessionKey", async (page) => {
+    if (done) return
+    page.add(noteRow(t("sk.help")))
+    page.add(headerRow(hasKey ? t("sk.replace") : t("sk.add")))
+    pasteRows(page, { pasteTitle: t("sk.paste"), promptTitle: "sessionKey", promptHint: t("sk.prompt"), secure: true,
+      emptyMessage: t("sk.clipEmpty"),
+      submit: async (key) => {
+        await api("PATCH", `/v1/accounts/${accountId}`, { session_key: key }, 60)
+        done = true
+        page.ok(t("common.didSave"), t("sk.savedDetail"))
+      } })
+    if (hasKey && canDelete) {
+      page.add(actionRow(t("sk.delete"), page.run(async () => {
+        if (!(await confirm(t("sk.delete"), t("sk.deleteConfirm"), t("common.delete"), true))) return
+        await api("PATCH", `/v1/accounts/${accountId}`, { session_key: "" })
+        done = true
+        page.ok(t("common.didDelete"), t("sk.backToAccount"))
+      }), C.bad))
+    }
+  })
+  return done
 }
 
 // ───────────────────────── 앱 UI: 계정 상세 ─────────────────────────
@@ -2420,22 +2429,16 @@ async function accountDetail(accountId) {
     usage.windows = visibleWindows({ ...usage, provider: acc.provider })
     const patch = (body, timeout) => api("PATCH", `/v1/accounts/${accountId}`, body, timeout)
 
-    await measureTexts(measureItemsFor(acc, usage, 22, 700, "detail"))
+    await measureTexts(measureItemsFor(acc, usage, "detail"))
     page.add(imageRow(detailHeaderImage(acc, usage), 80))
 
     const detail = usage.error || (usage.warnings || []).join(" / ") || null
-    const st = textRow(
-      `${STATUS_TEXT[usage.status] || usage.status}${usage.stale ? " · 이전에 받은 값" : ""}  ·  ${fmtAgo(usage.fetched_at)} 확인`,
-      detail,
-      detail ? 64 : 44
-    )
-    st.cell.titleFont = Font.systemFont(14)
-    st.cell.titleColor = usage.status === "ok" ? Color.gray() : usage.status === "partial" ? C.warn : C.bad
-    st.cell.subtitleColor = Color.gray()
-    page.add(st.row)
+    const color = usage.status === "ok" ? Color.gray() : usage.status === "partial" ? C.warn : C.bad
+    page.add(textRow(`${statusText(usage.status)}${usage.stale ? t("detail.stale") : ""}  ·  ${t("detail.checked", { ago: fmtAgo(usage.fetched_at) })}`,
+      detail, { height: detail ? 64 : 44, color, font: Font.systemFont(14) }))
 
     if ((usage.windows || []).length) {
-      page.add(headerRow("사용량"))
+      page.add(headerRow(t("detail.usage")))
       const dim = usage.stale || usage.status === "needs_login"
       for (const w of usage.windows) page.add(imageRow(windowRowImage(w, dim), 72))
     }
@@ -2444,129 +2447,135 @@ async function accountDetail(accountId) {
     if (acc.provider !== "antigravity") {
       const rc = usage.reset_credits
       const items = (rc && rc.items) || []
-      page.add(headerRow(items.length ? `초기화권 ${items.length}개` : "초기화권"))
-      if (items.length) {
-        items.forEach((item, i) => page.add(imageRow(resetCreditImage(item, i, acc.provider), 70)))
-      } else if (rc) {
-        page.add(textRow("지금 쓸 수 있는 초기화권이 없어요", "").row)
-      } else if (acc.provider === "claude" && !acc.auth.session_key) {
-        page.add(textRow("sessionKey가 있어야 확인할 수 있어요", "아래 'sessionKey'에서 추가할 수 있어요.").row)
-      } else {
-        page.add(textRow("확인하지 못했어요", usage.error || "").row)
-      }
+      page.add(headerRow(items.length ? t("detail.creditsN", { n: items.length }) : t("detail.credits")))
+      if (items.length) items.forEach((item, i) => page.add(imageRow(resetCreditImage(item, i, acc.provider), 70)))
+      else if (rc) page.add(textRow(t("detail.noCredits")))
+      else if (acc.provider === "claude" && !acc.auth.session_key) page.add(textRow(t("detail.needSk"), t("detail.needSkDesc")))
+      else page.add(textRow(t("detail.creditsFailed"), usage.error))
     }
 
     const { extra_usage: eu, credits: cr } = usage.extra || {}
-    if (eu) page.add(textRow("추가 사용량", `${eu.used ?? "–"} / ${eu.limit ?? "–"} ${eu.currency || ""} (${fmtPct(eu.used_percent)})`, 50).row)
-    else if (cr) page.add(textRow("크레딧", cr.unlimited ? "무제한" : `잔액 ${cr.balance ?? "–"}`, 50).row)
+    if (eu) page.add(textRow(t("detail.extraUsage"), `${eu.used ?? "–"} / ${eu.limit ?? "–"} ${eu.currency || ""} (${fmtPct(eu.used_percent)})`))
+    else if (cr) page.add(textRow(t("detail.creditBalance"), cr.unlimited ? t("detail.unlimited") : t("detail.balance", { n: cr.balance ?? "–" })))
 
-    page.add(headerRow("관리"))
-    page.add(actionRow("지금 새로고침", page.run(() => api("POST", `/v1/accounts/${accountId}/refresh`, undefined, 60)), ACCENT))
-    page.add(valueRow("이름", acc.label, page.run(async () => {
-      const name = await prompt("이름", "위젯에 보일 이름이에요.", { value: acc.label })
-      if (name) await patch({ label: name })
+    page.add(headerRow(t("detail.manage")))
+    page.add(actionRow(t("detail.refresh"), page.run(() => api("POST", `/v1/accounts/${accountId}/refresh`, undefined, 60)), ACCENT))
+    page.add(valueRow(t("common.name"), acc.label, page.run(async () => {
+      const label = await prompt(t("common.name"), t("detail.namePrompt"), { value: acc.label })
+      if (label) await patch({ label })
     }), { valueWidth: 55 }))
-    page.add(toggleRow("위젯에 표시", acc.enabled, page.run(() => patch({ enabled: !acc.enabled }))))
+    page.add(toggleRow(t("detail.showInWidget"), acc.enabled, page.run(() => patch({ enabled: !acc.enabled }))))
     if (acc.provider === "claude") {
-      page.add(valueRow("sessionKey", acc.auth.session_key ? "있음" : "없음", page.run(() =>
+      page.add(valueRow("sessionKey", acc.auth.session_key ? t("common.saved") : t("common.none"), page.run(() =>
         sessionKeyPage(accountId, { hasKey: !!acc.auth.session_key, canDelete: !!acc.auth.oauth })
-      ), { subtitle: "초기화권을 확인할 때 써요" }))
+      ), { subtitle: t("sk.rowDesc") }))
     }
     if (acc.provider !== "claude" || acc.auth.oauth || usage.status === "needs_login") {
-      page.add(linkRow("다시 로그인", page.run(() => loginPage(acc.provider, { accountId }))))
+      page.add(linkRow(t("detail.relogin"), page.run(() => loginPage(acc.provider, { accountId }))))
     }
-    page.add(actionRow("계정 삭제", page.run(async () => {
-      const where = getConfig().device ? "이 iPhone" : "서버"
-      if (!(await confirm("계정 삭제", `${acc.label} 계정과 로그인 정보를 ${where}에서 지울까요?`, "삭제", true))) return
+    page.add(actionRow(t("detail.delete"), page.run(async () => {
+      const where = t(getConfig().device ? "detail.whereDevice" : "detail.whereServer")
+      if (!(await confirm(t("detail.delete"), t("detail.deleteConfirm", { name: acc.label, where }), t("common.delete"), true))) return
       await api("DELETE", `/v1/accounts/${accountId}`)
       deleted = true
-      page.notice = { title: "삭제했어요", detail: "이 화면을 닫으면 목록으로 돌아가요.", color: C.ok }
+      page.ok(t("common.didDelete"), t("detail.backToList"))
     }), C.bad))
   })
 }
 
 // ───────────────────────── 앱 UI: 설정 ─────────────────────────
 async function settingsPage() {
-  await openPage("설정", async (page) => {
+  await openPage(() => t("settings.title"), async (page) => {
     const mode = getMode()
-    page.add(headerRow("연결 방식"))
-    page.add(checkRow("이 iPhone에서 직접", mode === "device", page.run(() => {
+    page.add(headerRow(t("settings.connection")))
+    page.add(checkRow(t("mode.device"), mode === "device", page.run(() => {
       if (mode === "device") return
       setMode("device")
-      page.notice = { title: "이 iPhone에서 직접 가져와요", detail: "계정 목록은 방식마다 따로예요. 필요하면 계정을 다시 추가해 주세요.", color: C.ok }
-    }), "서버 없이 이 스크립트가 로그인하고 조회해요."))
-    const server = mode === "server" && Keychain.contains(KC_SERVER) ? Keychain.get(KC_SERVER).replace(/^https?:\/\//, "") : null
-    page.add(checkRow("내 서버", mode === "server", page.run(async () => {
-      if (await serverPage()) page.notice = { title: "서버에 연결했어요", detail: "닫으면 서버의 계정 목록을 보여 드려요.", color: C.ok }
-    }), server || "직접 띄운 서버가 모은 사용량을 받아와요."))
+      page.ok(t("mode.deviceSet"), t("mode.deviceSetDetail"))
+    }), t("mode.deviceDesc")))
+    const server = mode === "server" ? kcGet(KC_SERVER, "").replace(/^https?:\/\//, "") : ""
+    page.add(checkRow(t("mode.server"), mode === "server", page.run(async () => {
+      if (await serverPage()) page.ok(t("mode.serverSet"), t("mode.serverSetDetail"))
+    }), server || t("mode.serverDesc")))
     if (mode === "device") {
-      page.add(valueRow("Antigravity 로그인 설정", agClient() ? "입력됨" : "없음", page.run(antigravityPage), { valueWidth: 25 }))
+      page.add(valueRow(t("ag.title"), agClient() ? t("common.set") : t("common.none"), page.run(antigravityPage), { valueWidth: 25 }))
     }
 
     const n = notifySettings()
-    page.add(headerRow("위젯·알림"))
-    page.add(valueRow("알림", n.enabled ? `켜짐 · ${n.threshold}%` : "꺼짐", page.run(notifyPage)))
-    page.add(linkRow("위젯 미리보기", page.run(widgetPreviewPage)))
+    page.add(headerRow(t("settings.widgetNotify")))
+    page.add(valueRow(t("settings.notify"), n.enabled ? t("settings.notifyOn", { n: n.threshold }) : t("common.off"), page.run(notifyPage)))
+    page.add(linkRow(t("settings.preview"), page.run(widgetPreviewPage)))
+    const setting = langSetting()
+    page.add(valueRow(t("settings.language"), LANG_INFO[setting] ? LANG_INFO[setting].name : t("lang.auto"), page.run(languagePage), { valueWidth: 50 }))
 
-    page.add(headerRow("Claude 로고"))
-    for (const [value, title] of [["default", "기본"], ["clawd", "Clawd"]]) {
+    page.add(headerRow(t("settings.claudeLogo")))
+    for (const [value, title] of [["default", t("settings.logoDefault")], ["clawd", "Clawd"]]) {
       page.add(checkRow(title, claudeLogo() === value, page.run(() => {
         setClaudeLogo(value)
         logoCache = {}
       })))
     }
-    page.add(noteRow(`버전 ${VERSION}`))
+    page.add(noteRow(t("settings.version", { v: VERSION })))
+  })
+}
+
+async function languagePage() {
+  await openPage(() => t("settings.language"), async (page) => {
+    const cur = langSetting()
+    const choose = (value) => page.run(() => setLang(value))
+    page.add(checkRow(t("lang.auto"), !LANG_INFO[cur], choose("auto"), LANG_INFO[resolveLang("auto")].name))
+    for (const code of LANG_CODES) page.add(checkRow(LANG_INFO[code].name, cur === code, choose(code)))
   })
 }
 
 async function notifyPage() {
-  await openPage("알림", async (page) => {
+  await openPage(t("settings.notify"), async (page) => {
     const cur = notifySettings()
     const save = (patch) => saveNotifySettings({ ...cur, ...patch })
-    page.add(toggleRow("알림 받기", cur.enabled, page.run(() => save({ enabled: !cur.enabled }))))
+    page.add(toggleRow(t("notify.receive"), cur.enabled, page.run(() => save({ enabled: !cur.enabled }))))
     if (!cur.enabled) return
 
-    page.add(headerRow("받을 알림"))
-    for (const t of NOTIFY_TYPES) {
-      const on = cur.types[t.key]
-      page.add(toggleRow(t.title, on, page.run(() => save({ types: { ...cur.types, [t.key]: !on } })), t.desc))
+    page.add(headerRow(t("notify.types")))
+    for (const type of NOTIFY_TYPES) {
+      const on = cur.types[type]
+      page.add(toggleRow(t(`notify.${type}.title`), on, page.run(() => save({ types: { ...cur.types, [type]: !on } })), t(`notify.${type}.desc`)))
     }
 
-    page.add(headerRow("경고 기준"))
-    for (const v of [80, 90, 95]) page.add(checkRow(`${v}% 이상`, cur.threshold === v, page.run(() => save({ threshold: v }))))
-    page.add(noteRow("사용량 경고와 초기화 알림은 위젯 대표 한도(현재 세션·이번 주 등)가 이 기준을 넘었을 때만 와요."))
+    page.add(headerRow(t("notify.threshold")))
+    for (const v of [80, 90, 95]) page.add(checkRow(t("notify.thresholdRow", { n: v }), cur.threshold === v, page.run(() => save({ threshold: v }))))
+    page.add(noteRow(t("notify.thresholdNote")))
 
-    page.add(headerRow("테스트"))
-    page.add(actionRow("테스트 알림 보내기", page.run(async () => {
-      await sendNotification({ id: "aiusage-test", title: "AI 사용량", body: "알림이 이렇게 와요." })
-      page.notice = { title: "보냈어요", detail: "알림이 오지 않으면 iPhone 설정 → 앱 → Scriptable → 알림을 확인해 주세요.", color: C.ok }
+    page.add(headerRow(t("notify.testSection")))
+    page.add(actionRow(t("notify.test"), page.run(async () => {
+      await sendNotification({ id: "aiusage-test", title: APP_TITLE, body: t("notify.test.body") })
+      page.ok(t("notify.sent"), t("notify.sentDetail"))
     }), ACCENT))
-    page.add(noteRow("위젯이 새로 고쳐질 때(약 15분마다)와 앱을 열 때 확인해요. 그래서 조기 초기화는 몇 분 늦게 알 수 있어요."))
+    page.add(noteRow(t("notify.timingNote")))
   })
 }
 
 async function widgetPreviewPage() {
-  await openPage("위젯 미리보기", async (page) => {
-    page.add(noteRow("홈 화면에 올렸을 때의 모습이에요. 위젯은 약 15분마다 새로 고쳐져요."))
-    for (const [size, title] of [["small", "소형"], ["medium", "중형"], ["large", "대형"]]) {
-      page.add(linkRow(title, page.run(async () => {
+  await openPage(t("settings.preview"), async (page) => {
+    page.add(noteRow(t("preview.note")))
+    for (const size of ["small", "medium", "large"]) {
+      page.add(linkRow(t(`preview.${size}`), page.run(async () => {
         const w = buildHomeWidget(await loadUsage(false), size, "")
         await { small: () => w.presentSmall(), medium: () => w.presentMedium(), large: () => w.presentLarge() }[size]()
       })))
     }
-    page.add(noteRow("위젯을 길게 눌러 '위젯 편집' → Parameter에 계정 이름을 쉼표로 적으면 그 계정만 보여요. 예) 개인,회사"))
+    page.add(noteRow(t("preview.paramNote")))
   })
 }
 
 // ───────────────────────── 앱 UI: 메인 ─────────────────────────
 async function mainMenu() {
   let refresh = false
-  await openPage("AI 사용량", async (page) => {
+  await openPage(APP_TITLE, async (page) => {
     if (!getConfig()) {
-      page.add(noteRow("Claude · Codex · Antigravity 사용량을 한곳에서 보여 줘요. 먼저 사용량을 어디서 가져올지 골라 주세요. 나중에 설정에서 바꿀 수 있어요."))
-      page.add(headerRow("시작하기"))
-      page.add(linkRow("이 iPhone에서 직접", page.run(() => setMode("device")), "서버 없이 바로 시작해요. 로그인 정보는 키체인에 저장돼요."))
-      page.add(linkRow("내 서버에 연결", page.run(serverPage), "직접 띄운 서버의 주소와 API 키가 필요해요."))
+      page.add(noteRow(t("main.intro")))
+      page.add(headerRow(t("main.start")))
+      page.add(linkRow(t("mode.device"), page.run(() => setMode("device")), t("main.startDeviceDesc")))
+      page.add(linkRow(t("main.startServer"), page.run(serverPage), t("main.startServerDesc")))
       return
     }
 
@@ -2578,15 +2587,15 @@ async function mainMenu() {
       const [acc, u] = await Promise.all([api("GET", "/v1/accounts"), loadUsage(doRefresh)])
       accounts = acc.accounts
       for (const a of u.data.accounts) usage[a.id] = a
-      if (u.offline) page.add(noticeRow({ title: "마지막으로 받은 값이에요", detail: u.error, color: C.warn }))
+      if (u.offline) page.add(noticeRow({ title: t("main.cached"), detail: u.error, color: C.warn }))
       else await checkAlerts(u.data.accounts)
     } catch (e) {
-      page.add(noticeRow({ title: getConfig().device ? "불러오지 못했어요" : "서버에 연결하지 못했어요", detail: e.message, color: C.bad }))
+      page.add(noticeRow({ title: t(getConfig().device ? "common.loadFailed" : "main.serverFailed"), detail: e.message, color: C.bad }))
     }
 
-    page.add(headerRow(`계정 (${accounts.length})`))
-    if (!accounts.length) page.add(textRow("아직 계정이 없어요", "아래 '계정 추가'로 시작해 보세요.").row)
-    await measureTexts(accounts.flatMap((acc) => measureItemsFor(acc, usage[acc.id], 17, 600, "card")))
+    page.add(headerRow(t("main.accounts", { n: accounts.length })))
+    if (!accounts.length) page.add(textRow(t("main.noAccounts"), t("main.noAccountsDesc")))
+    await measureTexts(accounts.flatMap((acc) => measureItemsFor(acc, usage[acc.id], "card")))
     for (const acc of accounts) {
       const u = usage[acc.id] || { ...acc, windows: [] }
       const card = accountCard({ ...acc, ...u, label: acc.label }, acc.enabled)
@@ -2596,11 +2605,420 @@ async function mainMenu() {
       page.add(r)
     }
 
-    page.add(headerRow("작업"))
-    page.add(linkRow("계정 추가", page.run(addAccountPage)))
-    page.add(actionRow("전체 새로고침", page.run(() => (refresh = true)), ACCENT))
-    page.add(linkRow("설정", page.run(settingsPage)))
+    page.add(headerRow(t("main.actions")))
+    page.add(linkRow(t("add.title"), page.run(addAccountPage)))
+    page.add(actionRow(t("main.refreshAll"), page.run(() => (refresh = true)), ACCENT))
+    page.add(linkRow(t("settings.title"), page.run(settingsPage)))
   })
+}
+
+// ───────────────────────── 문구 (i18n) ─────────────────────────
+// 한국어 · English · 日本語 · 简体中文. 설정 → 언어에서 고르거나 기기 언어를 따른다(지원하지 않는 언어는 영어).
+// 서버가 내려주는 오류 문구는 서버 언어(한국어) 그대로다.
+const KC_LANG = "aiusage.lang" // "auto" | LANG_CODES
+const LANG_CODES = ["ko", "en", "ja", "zh"]
+const LANG_INFO = {
+  ko: { name: "한국어", locale: "ko_KR", dateFormat: "M월 d일 (E) HH:mm" },
+  en: { name: "English", locale: "en_US", dateFormat: "EEE, MMM d HH:mm" },
+  ja: { name: "日本語", locale: "ja_JP", dateFormat: "M月d日(E) HH:mm" },
+  zh: { name: "简体中文", locale: "zh_CN", dateFormat: "M月d日 (E) HH:mm" },
+}
+const MONTHS_EN = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+function langSetting() {
+  return kcGet(KC_LANG, "auto")
+}
+
+function resolveLang(setting) {
+  if (LANG_INFO[setting]) return setting
+  try {
+    const code = String(Device.language() || "").toLowerCase().slice(0, 2)
+    return LANG_INFO[code] ? code : "en"
+  } catch (e) {
+    return "ko" // 기기 언어를 알 수 없으면(테스트 등) 원래 언어
+  }
+}
+
+let LANG = resolveLang(langSetting())
+
+function setLang(setting) {
+  Keychain.set(KC_LANG, setting)
+  LANG = resolveLang(setting)
+}
+
+// 문구 하나를 현재 언어로. {이름} 자리에 vars 값을 넣는다. 번역이 없으면 영어 → 한국어 순으로 쓴다.
+function t(key, vars = {}) {
+  const row = STRINGS[key]
+  if (!row) return key
+  const own = row[LANG_CODES.indexOf(LANG)]
+  const s = own != null ? own : row[1] != null ? row[1] : row[0]
+  if (typeof s === "function") return s(vars)
+  return s.replace(/\{(\w+)\}/g, (m, k) => (vars[k] != null ? String(vars[k]) : m))
+}
+
+// 서버·기기 모드가 만드는 한도 이름은 한국어가 기준이다. 화면에 낼 때 현재 언어로 바꾼다.
+function localLabel(label) {
+  if (LANG === "ko" || !label) return label
+  let m
+  if (label === "현재 세션") return t("win.session")
+  if (label === "이번 주") return t("win.week")
+  if (label === "주간") return t("win.weekly")
+  if (label === "추가 한도") return t("win.extra")
+  if (label === "모델별") return t("win.byModel")
+  if ((m = label.match(/^(\d+)시간$/))) return t("dur.h", { n: m[1] })
+  if ((m = label.match(/^(\d+)일$/))) return t("dur.d", { n: m[1] })
+  if ((m = label.match(/^(.+) 이번 주$/))) return t("win.modelWeek", { model: m[1] })
+  return label
+}
+
+// [한국어, English, 日本語, 简体中文]
+const STRINGS = {
+  // 공통
+  "common.ok": ["확인", "OK", "OK", "确定"],
+  "common.cancel": ["취소", "Cancel", "キャンセル", "取消"],
+  "common.delete": ["삭제", "Delete", "削除", "删除"],
+  "common.on": ["켜짐", "On", "オン", "开"],
+  "common.off": ["꺼짐", "Off", "オフ", "关"],
+  "common.enter": ["입력", "Enter", "入力", "输入"],
+  "common.set": ["입력됨", "Set", "設定済み", "已设置"],
+  "common.none": ["없음", "None", "なし", "无"],
+  "common.saved": ["있음", "Saved", "あり", "已保存"],
+  "common.typeIn": ["직접 입력", "Type it in", "直接入力", "手动输入"],
+  "common.name": ["이름", "Name", "名前", "名称"],
+  "common.error": ["문제가 생겼어요", "Something went wrong", "問題が発生しました", "出错了"],
+  "common.loadFailed": ["불러오지 못했어요", "Couldn't load", "読み込めませんでした", "加载失败"],
+  "common.noData": ["데이터 없음", "No data", "データなし", "暂无数据"],
+  "common.didSave": ["저장했어요", "Saved", "保存しました", "已保存"],
+  "common.didDelete": ["삭제했어요", "Deleted", "削除しました", "已删除"],
+
+  // 상태
+  "status.ok": ["정상", "OK", "正常", "正常"],
+  "status.partial": ["일부 실패", "Partly failed", "一部失敗", "部分失败"],
+  "status.needs_login": ["재로그인 필요", "Sign-in needed", "再ログインが必要", "需要重新登录"],
+  "status.error": ["오류", "Error", "エラー", "错误"],
+  "status.blocked": ["차단됨", "Blocked", "ブロック中", "被拦截"],
+  "status.rate_limited": ["요청 한도 초과", "Rate limited", "リクエスト制限", "请求过多"],
+  "status.pending": ["대기 중", "Pending", "待機中", "等待中"],
+  "pill.credits": ["초기화권 {n}", (v) => `${v.n} reset${v.n == 1 ? "" : "s"}`, "リセット券 {n}", "重置券 {n}"],
+  "pill.relogin": ["재로그인", "Sign in", "再ログイン", "需重新登录"],
+  "pill.partial": ["일부 실패", "Partial", "一部失敗", "部分失败"],
+  "pill.hidden": ["숨김", "Hidden", "非表示", "已隐藏"],
+  "pill.offline": ["오프라인", "Offline", "オフライン", "离线"],
+
+  // 시간
+  "dur.d": ["{n}일", "{n}d", "{n}日", "{n}天"],
+  "dur.h": ["{n}시간", "{n}h", "{n}時間", "{n}小时"],
+  "dur.m": ["{n}분", "{n}m", "{n}分", "{n}分钟"],
+  "dur.sep": [" ", " ", "", ""],
+  "reset.in": ["{t} 후 초기화", "Resets in {t}", "{t}後にリセット", "{t}后重置"],
+  "reset.inShort": ["{t} 후", "in {t}", "{t}後", "{t}后"],
+  "reset.soon": ["곧 초기화", "Resets soon", "まもなくリセット", "即将重置"],
+  "ago.now": ["방금", "just now", "たった今", "刚刚"],
+  "ago.m": ["{n}분 전", "{n}m ago", "{n}分前", "{n}分钟前"],
+  "ago.h": ["{n}시간 전", "{n}h ago", "{n}時間前", "{n}小时前"],
+  "ago.d": ["{n}일 전", "{n}d ago", "{n}日前", "{n}天前"],
+  "date.md": ["{m}월 {d}일", "{mon} {d}", "{m}月{d}日", "{m}月{d}日"],
+
+  // 한도 이름
+  "win.session": ["현재 세션", "Current session", "現在のセッション", "当前会话"],
+  "win.week": ["이번 주", "This week", "今週", "本周"],
+  "win.modelWeek": ["{model} 이번 주", "{model} this week", "{model} 今週", "{model} 本周"],
+  "win.weekly": ["주간", "Weekly", "週間", "每周"],
+  "win.extra": ["추가 한도", "Extra limit", "追加枠", "额外额度"],
+  "win.byModel": ["모델별", "By model", "モデル別", "按模型"],
+
+  // 위젯
+  "widget.empty": ["표시할 계정이 없어요. Scriptable 앱에서 계정을 추가해 주세요.", "No accounts to show. Add one in the Scriptable app.",
+    "表示するアカウントがありません。Scriptable アプリで追加してください。", "没有可显示的账号。请在 Scriptable 应用中添加。"],
+  "widget.updated": ["{ago} 확인", "Updated {ago}", "更新: {ago}", "{ago}更新"],
+  "widget.more": ["+{n}개 더 · 위젯 Parameter로 고를 수 있어요", "+{n} more · choose with the widget Parameter",
+    "他 {n} 件 · ウィジェットの Parameter で選べます", "还有 {n} 个 · 可用小组件 Parameter 选择"],
+  "widget.setup": ["Scriptable 앱에서 이 스크립트를 한 번 실행해 연결 방식을 골라 주세요.", "Run this script once in the Scriptable app and choose how to connect.",
+    "Scriptable アプリでこのスクリプトを一度実行し、接続方法を選んでください。", "请先在 Scriptable 应用中运行一次此脚本并选择连接方式。"],
+  "widget.loadFailed": ["불러오지 못했어요. {msg}", "Couldn't load. {msg}", "読み込めませんでした。{msg}", "加载失败。{msg}"],
+
+  // 알림
+  "notify.high.title": ["사용량 경고", "Usage warning", "使用量の警告", "用量警告"],
+  "notify.high.desc": ["대표 한도가 기준을 넘었을 때", "When a main limit passes the threshold", "主な上限がしきい値を超えたとき", "主要额度超过阈值时"],
+  "notify.reset.title": ["초기화 알림", "Reset", "リセット", "重置提醒"],
+  "notify.reset.desc": ["기준을 넘긴 한도가 예정 시각에 초기화될 때", "When a limit that passed the threshold resets on schedule",
+    "しきい値を超えた上限が予定どおりリセットされたとき", "超过阈值的额度按时重置时"],
+  "notify.early.title": ["조기 초기화 감지", "Early reset", "早期リセットの検知", "提前重置"],
+  "notify.early.desc": ["예정보다 일찍 한도가 초기화됐을 때", "When a limit resets earlier than scheduled", "予定より早く上限がリセットされたとき", "额度比预定时间更早重置时"],
+  "notify.login.title": ["재로그인 필요", "Sign-in needed", "再ログインが必要", "需要重新登录"],
+  "notify.login.desc": ["로그인이 만료돼 사용량을 못 가져올 때", "When sign-in expires and usage can't be fetched", "ログインが切れて使用量を取得できないとき", "登录过期、无法获取用量时"],
+  "notify.credit.title": ["초기화권 만료 임박", "Reset credit expiring", "リセット券の期限が近い", "重置券即将过期"],
+  "notify.credit.desc": ["초기화권이 하루 안에 만료될 때", "When a reset credit expires within a day", "リセット券が1日以内に期限切れになるとき", "重置券将在一天内过期时"],
+  "notify.login.body": ["다시 로그인해야 사용량을 가져올 수 있어요. 눌러서 열어 주세요.", "Sign in again to keep fetching usage. Tap to open.",
+    "使用量を取得するには再ログインが必要です。タップして開いてください。", "需要重新登录才能获取用量。点按打开。"],
+  "notify.early.body": ["{name} 한도가 예정보다 일찍 초기화됐어요. ({from}% → {to}%)", "{name} reset earlier than scheduled. ({from}% → {to}%)",
+    "{name} が予定より早くリセットされました。({from}% → {to}%)", "{name} 比预定时间更早重置了。({from}% → {to}%)"],
+  "notify.high.body": ["{name} 사용량이 {pct}%예요.", "{name} is at {pct}%.", "{name} の使用量が {pct}% です。", "{name} 已用 {pct}%。"],
+  "notify.high.resetIn": [" {t} 후 초기화돼요.", " Resets in {t}.", " {t}後にリセットされます。", " {t}后重置。"],
+  "notify.high.resetSoon": [" 곧 초기화돼요.", " Resets soon.", " まもなくリセットされます。", " 即将重置。"],
+  "notify.reset.body": ["{name} 한도가 초기화됐어요. 다시 쓸 수 있어요.", "{name} has reset. You're good to go.",
+    "{name} がリセットされました。また使えます。", "{name} 已重置，可以继续使用了。"],
+  "notify.credit.body": ["초기화권 1장이 {t} 뒤에 만료돼요. 필요하면 그 전에 쓰세요.", "A reset credit expires in {t}. Use it before then if you need it.",
+    "リセット券が {t}後に期限切れになります。必要ならその前に使ってください。", "一张重置券将在 {t}后过期，如有需要请提前使用。"],
+  "notify.test.body": ["알림이 이렇게 와요.", "This is how notifications look.", "通知はこのように届きます。", "通知会像这样显示。"],
+
+  // 서버 연결
+  "server.title": ["서버 연결", "Server", "サーバー接続", "服务器连接"],
+  "server.note": ["직접 띄운 사용량 서버에 연결해요. 서버를 설치하는 방법은 저장소의 README에 있어요.",
+    "Connect to your own usage server. See the repository README for how to set it up.",
+    "自分で立てた使用量サーバーに接続します。設置方法はリポジトリの README にあります。", "连接你自己部署的用量服务器。部署方法见仓库的 README。"],
+  "server.section": ["서버", "Server", "サーバー", "服务器"],
+  "server.address": ["주소", "Address", "アドレス", "地址"],
+  "server.addressPrompt": ["서버 주소", "Server address", "サーバーアドレス", "服务器地址"],
+  "server.addressExample": ["예) https://ai.example.com", "e.g. https://ai.example.com", "例) https://ai.example.com", "例如 https://ai.example.com"],
+  "server.apiKey": ["API 키", "API key", "API キー", "API 密钥"],
+  "server.apiKeyHelp": ["서버에 설정한 AIUSAGE_API_KEY 값이에요.", "The AIUSAGE_API_KEY value set on your server.",
+    "サーバーに設定した AIUSAGE_API_KEY の値です。", "服务器上设置的 AIUSAGE_API_KEY 值。"],
+  "server.save": ["연결 확인하고 저장", "Test connection and save", "接続を確認して保存", "测试连接并保存"],
+  "server.missing": ["주소와 API 키를 모두 넣어 주세요.", "Enter both the address and the API key.", "アドレスと API キーを両方入力してください。", "请填写地址和 API 密钥。"],
+  "server.connected": ["연결됐어요", "Connected", "接続しました", "已连接"],
+  "server.connectedDetail": ["이 화면을 닫으면 서버의 계정 목록을 보여 드려요.", "Close this screen to see the server's accounts.",
+    "この画面を閉じるとサーバーのアカウント一覧を表示します。", "关闭此页面即可查看服务器上的账号。"],
+
+  // Antigravity 로그인 설정
+  "ag.title": ["Antigravity 로그인 설정", "Antigravity sign-in setup", "Antigravity ログイン設定", "Antigravity 登录设置"],
+  "ag.help": [
+    "PC에 설치한 Antigravity 앱의 resources/app/out/main.js 파일에서 두 값을 찾아 넣어 주세요.\n• Client ID: ….apps.googleusercontent.com 으로 끝나는 값\n• Client Secret: GOCSPX- 로 시작하는 값",
+    "Find these two values in resources/app/out/main.js of the Antigravity app installed on your computer.\n• Client ID: ends with ….apps.googleusercontent.com\n• Client Secret: starts with GOCSPX-",
+    "PC にインストールした Antigravity アプリの resources/app/out/main.js から2つの値を探して入力してください。\n• Client ID: ….apps.googleusercontent.com で終わる値\n• Client Secret: GOCSPX- で始まる値",
+    "请在电脑上安装的 Antigravity 应用的 resources/app/out/main.js 中找到以下两个值。\n• Client ID：以 ….apps.googleusercontent.com 结尾\n• Client Secret：以 GOCSPX- 开头",
+  ],
+  "ag.section": ["Google OAuth 클라이언트", "Google OAuth client", "Google OAuth クライアント", "Google OAuth 客户端"],
+  "ag.idHelp": ["….apps.googleusercontent.com 으로 끝나는 값이에요.", "Ends with ….apps.googleusercontent.com.",
+    "….apps.googleusercontent.com で終わる値です。", "以 ….apps.googleusercontent.com 结尾。"],
+  "ag.secretHelp": ["GOCSPX- 로 시작하는 값이에요.", "Starts with GOCSPX-.", "GOCSPX- で始まる値です。", "以 GOCSPX- 开头。"],
+  "ag.ready": ["준비됐어요", "Ready", "準備できました", "已就绪"],
+  "ag.readyDetail": ["이제 Antigravity 계정을 추가할 수 있어요.", "You can now add an Antigravity account.", "Antigravity アカウントを追加できます。", "现在可以添加 Antigravity 账号了。"],
+
+  // 계정 추가·로그인
+  "add.title": ["계정 추가", "Add account", "アカウントを追加", "添加账号"],
+  "add.which": ["어떤 서비스를 추가할까요?", "Which service?", "どのサービスを追加しますか？", "要添加哪个服务？"],
+  "add.done": ["계정을 추가했어요", "Account added", "アカウントを追加しました", "已添加账号"],
+  "add.doneDetail": ["이 화면을 닫으면 목록에 보여요.", "Close this screen to see it in the list.", "この画面を閉じると一覧に表示されます。", "关闭此页面后即可在列表中看到。"],
+  "provider.desc.claude": ["사용량 · 초기화권 · 플랜", "Usage · reset credits · plan", "使用量 · リセット券 · プラン", "用量 · 重置券 · 套餐"],
+  "provider.desc.codex": ["사용량 · 초기화권 · 플랜", "Usage · reset credits · plan", "使用量 · リセット券 · プラン", "用量 · 重置券 · 套餐"],
+  "provider.desc.antigravity": ["모델 그룹별 사용량", "Usage by model group", "モデルグループ別の使用量", "按模型分组的用量"],
+  "provider.needsSetup": ["설정이 필요해요", "Needs setup", "設定が必要です", "需要设置"],
+  "login.titleAdd": ["{provider} 계정 추가", "Add {provider} account", "{provider} アカウントを追加", "添加 {provider} 账号"],
+  "login.titleRelogin": ["{provider} 다시 로그인", "Sign in to {provider} again", "{provider} に再ログイン", "重新登录 {provider}"],
+  "login.guide.claude": ["로그인하고 승인하면 코드가 나와요. 'Copy Code'로 복사한 뒤 돌아와서 '붙여넣기'를 누르세요.",
+    "Sign in and approve to get a code. Copy it with 'Copy Code', come back, and tap 'Paste'.",
+    "ログインして承認するとコードが表示されます。'Copy Code' でコピーしてから戻り、「貼り付け」を押してください。",
+    "登录并授权后会显示代码。用 'Copy Code' 复制后返回，点“粘贴”。"],
+  "login.guide.codex": ["ChatGPT로 로그인하면 '연결할 수 없음' 페이지가 떠요. 정상이에요. 주소창의 주소를 통째로 복사한 뒤 돌아와서 '붙여넣기'를 누르세요.",
+    "After signing in with ChatGPT you'll land on a page that can't be opened. That's expected. Copy the whole URL from the address bar, come back, and tap 'Paste'.",
+    "ChatGPT でログインすると「接続できません」というページが開きます。これで正常です。アドレスバーの URL を丸ごとコピーして戻り、「貼り付け」を押してください。",
+    "用 ChatGPT 登录后会打开一个无法访问的页面，这是正常的。复制地址栏中的完整网址，返回后点“粘贴”。"],
+  "login.guide.antigravity": ["Antigravity에서 쓰는 Google 계정으로 로그인하면 열리지 않는 페이지로 이동해요. 정상이에요. 주소창의 주소를 통째로 복사한 뒤 돌아와서 '붙여넣기'를 누르세요.",
+    "Sign in with the Google account you use in Antigravity and you'll land on a page that won't open. That's expected. Copy the whole URL from the address bar, come back, and tap 'Paste'.",
+    "Antigravity で使う Google アカウントでログインすると、開けないページに移動します。これで正常です。アドレスバーの URL を丸ごとコピーして戻り、「貼り付け」を押してください。",
+    "用你在 Antigravity 中使用的 Google 账号登录后，会跳到一个打不开的页面，这是正常的。复制地址栏中的完整网址，返回后点“粘贴”。"],
+  "login.hint.claude": ["복사한 코드 (code#state 형식)", "The copied code (code#state)", "コピーしたコード (code#state 形式)", "复制的代码（code#state 格式）"],
+  "login.hint.codex": ["localhost:1455 로 시작하는 주소 전체", "The full URL starting with localhost:1455", "localhost:1455 で始まる URL 全体", "以 localhost:1455 开头的完整网址"],
+  "login.hint.antigravity": ["127.0.0.1:8585 로 시작하는 주소 전체", "The full URL starting with 127.0.0.1:8585", "127.0.0.1:8585 で始まる URL 全体", "以 127.0.0.1:8585 开头的完整网址"],
+  "login.relogged": ["다시 로그인했어요", "Signed in again", "再ログインしました", "已重新登录"],
+  "login.status": [" · 상태: {status}", " · Status: {status}", " · 状態: {status}", " · 状态：{status}"],
+  "login.closeToList": [" · 닫으면 목록으로 돌아가요.", " · Close to go back to the list.", " · 閉じると一覧に戻ります。", " · 关闭即可返回列表。"],
+  "login.needOpenFirst": ["먼저 '1. 로그인 페이지 열기'로 로그인해 주세요.", "Sign in first with '1. Open sign-in page'.",
+    "先に「1. ログインページを開く」でログインしてください。", "请先通过“1. 打开登录页面”登录。"],
+  "login.clipEmpty": ["클립보드가 비어 있어요. 로그인 페이지에서 다시 복사해 주세요.", "The clipboard is empty. Copy it again from the sign-in page.",
+    "クリップボードが空です。ログインページでもう一度コピーしてください。", "剪贴板为空。请在登录页面重新复制。"],
+  "login.nameRow": ["위젯에 보일 이름", "Name shown in the widget", "ウィジェットに表示する名前", "在小组件中显示的名称"],
+  "login.nameDefault": ["이메일 앞부분", "Email prefix", "メールの前半", "邮箱前缀"],
+  "login.namePrompt": ["비워 두면 이메일 앞부분을 써요.", "Leave empty to use the part of the email before @.",
+    "空欄ならメールアドレスの @ より前を使います。", "留空则使用邮箱 @ 前的部分。"],
+  "login.namePlaceholder": ["예) 개인", "e.g. Personal", "例) 個人", "例如 个人"],
+  "login.method": ["추가 방식", "Method", "追加方法", "添加方式"],
+  "login.oauth": ["OAuth 로그인 (추천)", "OAuth sign-in (recommended)", "OAuth ログイン（おすすめ）", "OAuth 登录（推荐）"],
+  "login.oauthDesc": ["사용량과 플랜을 안정적으로 가져와요. 초기화권은 나중에 sessionKey로 더할 수 있어요.",
+    "Reliable usage and plan. You can add a sessionKey later for reset credits.",
+    "使用量とプランを安定して取得します。リセット券は後から sessionKey で追加できます。", "稳定获取用量和套餐。之后可以添加 sessionKey 来查看重置券。"],
+  "login.skDesc": ["사용량과 초기화권까지 가져와요. claude.ai 쿠키 값이 필요해요.", "Usage plus reset credits. Needs a claude.ai cookie.",
+    "使用量とリセット券まで取得します。claude.ai の Cookie が必要です。", "可获取用量和重置券。需要 claude.ai 的 Cookie。"],
+  "login.section": ["로그인", "Sign in", "ログイン", "登录"],
+  "login.open": ["1. 로그인 페이지 열기", "1. Open sign-in page", "1. ログインページを開く", "1. 打开登录页面"],
+  "login.paste": ["2. 복사한 값 붙여넣기", "2. Paste what you copied", "2. コピーした値を貼り付け", "2. 粘贴复制的内容"],
+
+  // sessionKey
+  "sk.help": ["초기화권은 claude.ai 웹에서만 확인할 수 있어서 sessionKey가 필요해요. PC 브라우저로 claude.ai에 로그인한 뒤 개발자 도구 → Application → Cookies → https://claude.ai 에서 'sessionKey' 값(sk-ant-…)을 복사해 주세요.",
+    "Reset credits are only available on the claude.ai website, so a sessionKey is needed. Sign in to claude.ai in a desktop browser, open Developer Tools → Application → Cookies → https://claude.ai and copy the 'sessionKey' value (sk-ant-…).",
+    "リセット券は claude.ai のウェブでしか確認できないため sessionKey が必要です。PC のブラウザで claude.ai にログインし、開発者ツール → Application → Cookies → https://claude.ai から 'sessionKey' の値 (sk-ant-…) をコピーしてください。",
+    "重置券只能在 claude.ai 网页上查看，因此需要 sessionKey。在电脑浏览器登录 claude.ai，打开开发者工具 → Application → Cookies → https://claude.ai，复制 'sessionKey' 的值（sk-ant-…）。"],
+  "sk.paste": ["복사한 sessionKey 붙여넣기", "Paste copied sessionKey", "コピーした sessionKey を貼り付け", "粘贴复制的 sessionKey"],
+  "sk.prompt": ["sk-ant- 로 시작하는 값이에요.", "Starts with sk-ant-.", "sk-ant- で始まる値です。", "以 sk-ant- 开头。"],
+  "sk.clipEmpty": ["클립보드가 비어 있어요. sessionKey를 다시 복사해 주세요.", "The clipboard is empty. Copy the sessionKey again.",
+    "クリップボードが空です。sessionKey をもう一度コピーしてください。", "剪贴板为空。请重新复制 sessionKey。"],
+  "sk.savedDetail": ["초기화권을 확인했어요. 닫으면 계정 화면으로 돌아가요.", "Reset credits checked. Close to go back to the account.",
+    "リセット券を確認しました。閉じるとアカウント画面に戻ります。", "已查询重置券。关闭即可返回账号页面。"],
+  "sk.replace": ["새 값으로 바꾸기", "Replace", "新しい値に置き換える", "替换为新值"],
+  "sk.add": ["추가하기", "Add", "追加する", "添加"],
+  "sk.delete": ["sessionKey 삭제", "Delete sessionKey", "sessionKey を削除", "删除 sessionKey"],
+  "sk.deleteConfirm": ["초기화권이 더 이상 표시되지 않아요.", "Reset credits will no longer be shown.", "リセット券が表示されなくなります。", "将不再显示重置券。"],
+  "sk.backToAccount": ["닫으면 계정 화면으로 돌아가요.", "Close to go back to the account.", "閉じるとアカウント画面に戻ります。", "关闭即可返回账号页面。"],
+  "sk.rowDesc": ["초기화권을 확인할 때 써요", "Used to check reset credits", "リセット券の確認に使います", "用于查看重置券"],
+
+  // 계정 화면
+  "detail.resetAt": ["{date} 초기화", "Resets {date}", "{date} にリセット", "{date} 重置"],
+  "detail.noReset": ["초기화 시각 정보 없음", "No reset time", "リセット時刻の情報なし", "无重置时间信息"],
+  "detail.stale": [" · 이전에 받은 값", " · Last known value", " · 前回の値", " · 上次获取的值"],
+  "detail.checked": ["{ago} 확인", "Checked {ago}", "確認: {ago}", "{ago}检查"],
+  "detail.usage": ["사용량", "Usage", "使用量", "用量"],
+  "detail.credits": ["초기화권", "Reset credits", "リセット券", "重置券"],
+  "detail.creditsN": ["초기화권 {n}개", "Reset credits ({n})", "リセット券 {n}枚", "重置券 {n} 张"],
+  "detail.noCredits": ["지금 쓸 수 있는 초기화권이 없어요", "No reset credits available right now", "今使えるリセット券はありません", "目前没有可用的重置券"],
+  "detail.needSk": ["sessionKey가 있어야 확인할 수 있어요", "A sessionKey is needed to check", "確認には sessionKey が必要です", "需要 sessionKey 才能查看"],
+  "detail.needSkDesc": ["아래 'sessionKey'에서 추가할 수 있어요.", "Add it under 'sessionKey' below.", "下の「sessionKey」から追加できます。", "可在下方“sessionKey”中添加。"],
+  "detail.creditsFailed": ["확인하지 못했어요", "Couldn't check", "確認できませんでした", "无法查询"],
+  "detail.extraUsage": ["추가 사용량", "Extra usage", "追加使用量", "额外用量"],
+  "detail.creditBalance": ["크레딧", "Credits", "クレジット", "积分"],
+  "detail.unlimited": ["무제한", "Unlimited", "無制限", "无限"],
+  "detail.balance": ["잔액 {n}", "Balance {n}", "残高 {n}", "余额 {n}"],
+  "detail.manage": ["관리", "Manage", "管理", "管理"],
+  "detail.refresh": ["지금 새로고침", "Refresh now", "今すぐ更新", "立即刷新"],
+  "detail.namePrompt": ["위젯에 보일 이름이에요.", "The name shown in the widget.", "ウィジェットに表示する名前です。", "在小组件中显示的名称。"],
+  "detail.showInWidget": ["위젯에 표시", "Show in widget", "ウィジェットに表示", "在小组件中显示"],
+  "detail.relogin": ["다시 로그인", "Sign in again", "再ログイン", "重新登录"],
+  "detail.delete": ["계정 삭제", "Delete account", "アカウントを削除", "删除账号"],
+  "detail.deleteConfirm": ["{name} 계정과 로그인 정보를 {where}에서 지울까요?", "Delete {name} and its sign-in data from {where}?",
+    "{name} とログイン情報を{where}から削除しますか？", "要从{where}删除 {name} 及其登录信息吗？"],
+  "detail.whereDevice": ["이 iPhone", "this iPhone", "この iPhone", "此 iPhone"],
+  "detail.whereServer": ["서버", "the server", "サーバー", "服务器"],
+  "detail.backToList": ["이 화면을 닫으면 목록으로 돌아가요.", "Close this screen to go back to the list.", "この画面を閉じると一覧に戻ります。", "关闭此页面即可返回列表。"],
+  "credit.title": ["사용량 초기화권", "Usage reset credit", "使用量リセット券", "用量重置券"],
+  "credit.noExpiry": ["만료 없음", "No expiry", "期限なし", "无期限"],
+  "credit.daysLeft": ["{n}일 남음", "{n}d left", "残り{n}日", "剩 {n} 天"],
+  "credit.left": ["{t} 남음", "{t} left", "残り{t}", "剩 {t}"],
+  "credit.soon": ["곧 만료", "Expiring", "まもなく期限切れ", "即将过期"],
+  "credit.expires": ["{date} 만료", "Expires {date}", "{date} 期限", "{date} 过期"],
+  "credit.granted": ["{date} 지급", "Granted {date}", "{date} 付与", "{date} 发放"],
+
+  // 설정
+  "settings.title": ["설정", "Settings", "設定", "设置"],
+  "settings.connection": ["연결 방식", "Connection", "接続方法", "连接方式"],
+  "settings.widgetNotify": ["위젯·알림", "Widget & notifications", "ウィジェット・通知", "小组件与通知"],
+  "settings.notify": ["알림", "Notifications", "通知", "通知"],
+  "settings.notifyOn": ["켜짐 · {n}%", "On · {n}%", "オン · {n}%", "开 · {n}%"],
+  "settings.preview": ["위젯 미리보기", "Widget preview", "ウィジェットのプレビュー", "小组件预览"],
+  "settings.claudeLogo": ["Claude 로고", "Claude logo", "Claude ロゴ", "Claude 图标"],
+  "settings.logoDefault": ["기본", "Default", "標準", "默认"],
+  "settings.language": ["언어", "Language", "言語", "语言"],
+  "settings.version": ["버전 {v}", "Version {v}", "バージョン {v}", "版本 {v}"],
+  "lang.auto": ["기기 설정 따르기", "Use device language", "端末の言語に合わせる", "跟随系统"],
+  "mode.device": ["이 iPhone에서 직접", "Directly on this iPhone", "この iPhone で直接", "直接在此 iPhone 上"],
+  "mode.deviceDesc": ["서버 없이 이 스크립트가 로그인하고 조회해요.", "No server: this script signs in and fetches by itself.",
+    "サーバーなしで、このスクリプトがログインと取得を行います。", "无需服务器，由此脚本登录并获取数据。"],
+  "mode.deviceSet": ["이 iPhone에서 직접 가져와요", "Now fetching on this iPhone", "この iPhone で直接取得します", "现在直接在此 iPhone 上获取"],
+  "mode.deviceSetDetail": ["계정 목록은 방식마다 따로예요. 필요하면 계정을 다시 추가해 주세요.", "Each mode has its own account list. Add accounts again if needed.",
+    "アカウント一覧は方法ごとに別です。必要ならアカウントを追加し直してください。", "每种方式的账号列表是分开的。如有需要请重新添加账号。"],
+  "mode.server": ["내 서버", "My server", "自分のサーバー", "我的服务器"],
+  "mode.serverDesc": ["직접 띄운 서버가 모은 사용량을 받아와요.", "Reads usage collected by your own server.", "自分のサーバーが集めた使用量を受け取ります。", "读取你自己的服务器收集的用量。"],
+  "mode.serverSet": ["서버에 연결했어요", "Connected to the server", "サーバーに接続しました", "已连接到服务器"],
+  "mode.serverSetDetail": ["닫으면 서버의 계정 목록을 보여 드려요.", "Close to see the server's accounts.", "閉じるとサーバーのアカウント一覧を表示します。", "关闭即可查看服务器上的账号。"],
+
+  // 알림 설정
+  "notify.receive": ["알림 받기", "Allow notifications", "通知を受け取る", "接收通知"],
+  "notify.types": ["받을 알림", "Notify me about", "受け取る通知", "通知类型"],
+  "notify.threshold": ["경고 기준", "Warning threshold", "警告のしきい値", "警告阈值"],
+  "notify.thresholdRow": ["{n}% 이상", "{n}% or more", "{n}% 以上", "{n}% 及以上"],
+  "notify.thresholdNote": ["사용량 경고와 초기화 알림은 위젯 대표 한도(현재 세션·이번 주 등)가 이 기준을 넘었을 때만 와요.",
+    "Usage warnings and reset alerts only fire when a main limit (current session, this week, …) passes this threshold.",
+    "使用量の警告とリセット通知は、主な上限（現在のセッション・今週など）がこのしきい値を超えたときだけ届きます。",
+    "用量警告和重置提醒仅在主要额度（当前会话、本周等）超过此阈值时发送。"],
+  "notify.testSection": ["테스트", "Test", "テスト", "测试"],
+  "notify.test": ["테스트 알림 보내기", "Send a test notification", "テスト通知を送る", "发送测试通知"],
+  "notify.sent": ["보냈어요", "Sent", "送信しました", "已发送"],
+  "notify.sentDetail": ["알림이 오지 않으면 iPhone 설정 → 앱 → Scriptable → 알림을 확인해 주세요.",
+    "If nothing arrives, check iPhone Settings → Apps → Scriptable → Notifications.",
+    "届かない場合は iPhone の設定 → アプリ → Scriptable → 通知 を確認してください。", "如果没有收到，请检查 iPhone 设置 → App → Scriptable → 通知。"],
+  "notify.timingNote": ["위젯이 새로 고쳐질 때(약 15분마다)와 앱을 열 때 확인해요. 그래서 조기 초기화는 몇 분 늦게 알 수 있어요.",
+    "Checked when the widget refreshes (about every 15 minutes) and when you open the app, so early resets may be noticed a few minutes late.",
+    "ウィジェットの更新時（約15分ごと）とアプリを開いたときに確認するため、早期リセットは数分遅れて分かることがあります。",
+    "在小组件刷新时（约每 15 分钟）和打开应用时检查，因此提前重置可能会晚几分钟发现。"],
+
+  // 위젯 미리보기
+  "preview.note": ["홈 화면에 올렸을 때의 모습이에요. 위젯은 약 15분마다 새로 고쳐져요.", "How it looks on the Home Screen. Widgets refresh about every 15 minutes.",
+    "ホーム画面に置いたときの見た目です。ウィジェットは約15分ごとに更新されます。", "放在主屏幕上的样子。小组件约每 15 分钟刷新一次。"],
+  "preview.small": ["소형", "Small", "小", "小"],
+  "preview.medium": ["중형", "Medium", "中", "中"],
+  "preview.large": ["대형", "Large", "大", "大"],
+  "preview.paramNote": ["위젯을 길게 눌러 '위젯 편집' → Parameter에 계정 이름을 쉼표로 적으면 그 계정만 보여요. 예) 개인,회사",
+    "Long-press the widget → Edit Widget → enter account names separated by commas in Parameter to show only those. e.g. Personal,Work",
+    "ウィジェットを長押し →「ウィジェットを編集」→ Parameter にアカウント名をカンマ区切りで入れると、そのアカウントだけ表示します。例) 個人,仕事",
+    "长按小组件 → “编辑小组件” → 在 Parameter 中用逗号分隔填写账号名称，即可只显示这些账号。例如 个人,工作"],
+
+  // 메인
+  "main.intro": ["Claude · Codex · Antigravity 사용량을 한곳에서 보여 줘요. 먼저 사용량을 어디서 가져올지 골라 주세요. 나중에 설정에서 바꿀 수 있어요.",
+    "See Claude, Codex and Antigravity usage in one place. First, choose where to get usage from. You can change this later in Settings.",
+    "Claude · Codex · Antigravity の使用量をまとめて表示します。まず使用量の取得先を選んでください。あとで設定から変更できます。",
+    "在一处查看 Claude、Codex 和 Antigravity 的用量。请先选择从哪里获取用量，之后可在设置中更改。"],
+  "main.start": ["시작하기", "Get started", "はじめる", "开始使用"],
+  "main.startDeviceDesc": ["서버 없이 바로 시작해요. 로그인 정보는 키체인에 저장돼요.", "Start right away without a server. Sign-in data is stored in the Keychain.",
+    "サーバーなしですぐ始められます。ログイン情報はキーチェーンに保存されます。", "无需服务器，立即开始。登录信息保存在钥匙串中。"],
+  "main.startServer": ["내 서버에 연결", "Connect to my server", "自分のサーバーに接続", "连接到我的服务器"],
+  "main.startServerDesc": ["직접 띄운 서버의 주소와 API 키가 필요해요.", "Needs your server's address and API key.", "自分のサーバーのアドレスと API キーが必要です。", "需要你的服务器地址和 API 密钥。"],
+  "main.cached": ["마지막으로 받은 값이에요", "Showing the last values received", "最後に取得した値です", "显示的是上次获取的数据"],
+  "main.serverFailed": ["서버에 연결하지 못했어요", "Couldn't reach the server", "サーバーに接続できませんでした", "无法连接到服务器"],
+  "main.accounts": ["계정 ({n})", "Accounts ({n})", "アカウント ({n})", "账号 ({n})"],
+  "main.noAccounts": ["아직 계정이 없어요", "No accounts yet", "まだアカウントがありません", "还没有账号"],
+  "main.noAccountsDesc": ["아래 '계정 추가'로 시작해 보세요.", "Start with 'Add account' below.", "下の「アカウントを追加」から始めましょう。", "点下方“添加账号”开始吧。"],
+  "main.actions": ["작업", "Actions", "操作", "操作"],
+  "main.refreshAll": ["전체 새로고침", "Refresh all", "すべて更新", "全部刷新"],
+
+  // 기기 모드 오류
+  "err.network": ["네트워크 오류: {msg}", "Network error: {msg}", "ネットワークエラー: {msg}", "网络错误：{msg}"],
+  "err.json": ["응답을 읽지 못했어요: {text}", "Couldn't read the response: {text}", "応答を読み取れませんでした: {text}", "无法解析响应：{text}"],
+  "err.auth": ["{what}: 인증 실패(HTTP {status})", "{what}: authentication failed (HTTP {status})", "{what}: 認証に失敗しました (HTTP {status})", "{what}：认证失败（HTTP {status}）"],
+  "err.rateLimited": ["{what}: 요청 한도 초과(429)", "{what}: rate limited (429)", "{what}: リクエスト制限 (429)", "{what}：请求过多（429）"],
+  "err.blocked": ["{what}: Cloudflare 챌린지로 차단됨", "{what}: blocked by a Cloudflare challenge", "{what}: Cloudflare のチャレンジでブロックされました", "{what}：被 Cloudflare 验证拦截"],
+  "err.emptyInput": ["입력이 비어 있어요.", "The input is empty.", "入力が空です。", "输入为空。"],
+  "err.loginDenied": ["로그인이 거부됐거나 실패했어요: {error}", "Sign-in was denied or failed: {error}", "ログインが拒否されたか失敗しました: {error}", "登录被拒绝或失败：{error}"],
+  "err.noCode": ["URL에 code 값이 없어요. 주소창의 주소를 통째로 복사했는지 확인해 주세요.", "The URL has no code. Make sure you copied the whole URL from the address bar.",
+    "URL に code がありません。アドレスバーの URL を丸ごとコピーしたか確認してください。", "网址中没有 code。请确认复制了地址栏中的完整网址。"],
+  "err.state": ["state 값이 맞지 않아요. 로그인을 처음부터 다시 해 주세요.", "The state doesn't match. Please start the sign-in again.",
+    "state の値が一致しません。最初からログインし直してください。", "state 不匹配。请重新开始登录。"],
+  "err.noAccessToken": ["토큰 응답에 access_token이 없어요.", "The token response has no access_token.", "トークン応答に access_token がありません。", "令牌响应中没有 access_token。"],
+  "err.noOrgs": ["claude.ai 조직 목록이 비어 있어요.", "The claude.ai organization list is empty.", "claude.ai の組織一覧が空です。", "claude.ai 组织列表为空。"],
+  "err.tokenExchange": ["토큰 교환 실패: HTTP {status} {text}", "Token exchange failed: HTTP {status} {text}", "トークン交換に失敗: HTTP {status} {text}", "令牌交换失败：HTTP {status} {text}"],
+  "err.skPrefix": ["sessionKey는 'sk-ant-'로 시작해야 해요.", "The sessionKey must start with 'sk-ant-'.", "sessionKey は 'sk-ant-' で始まる必要があります。", "sessionKey 必须以 'sk-ant-' 开头。"],
+  "err.noRefresh": ["리프레시 토큰이 없어요. 다시 로그인해 주세요.", "No refresh token. Please sign in again.", "リフレッシュトークンがありません。再ログインしてください。", "没有刷新令牌。请重新登录。"],
+  "err.refreshDenied": ["토큰 갱신이 거부됐어요(HTTP {status}). 다시 로그인해 주세요.", "Token refresh was rejected (HTTP {status}). Please sign in again.",
+    "トークンの更新が拒否されました (HTTP {status})。再ログインしてください。", "令牌刷新被拒绝（HTTP {status}）。请重新登录。"],
+  "err.agClient": ["설정 → Antigravity 로그인 설정에서 Client ID와 Secret을 먼저 넣어 주세요.", "Enter the Client ID and Secret first in Settings → Antigravity sign-in setup.",
+    "先に 設定 → Antigravity ログイン設定 で Client ID と Secret を入力してください。", "请先在 设置 → Antigravity 登录设置 中填写 Client ID 和 Secret。"],
+  "err.agAuth": ["Antigravity 인증 실패(401)", "Antigravity authentication failed (401)", "Antigravity の認証に失敗しました (401)", "Antigravity 认证失败（401）"],
+  "err.forbidden": ["{method}: 권한 없음(403) {text}", "{method}: forbidden (403) {text}", "{method}: 権限がありません (403) {text}", "{method}：无权限（403）{text}"],
+  "err.noGoogleRefresh": ["refresh_token을 받지 못했어요. Google 계정 설정에서 앱 연결을 해제한 뒤 다시 시도해 주세요.",
+    "No refresh_token was returned. Remove the app's access in your Google account settings and try again.",
+    "refresh_token を受け取れませんでした。Google アカウントの設定でアプリの連携を解除してから再試行してください。",
+    "未获得 refresh_token。请在 Google 账号设置中移除该应用的访问权限后重试。"],
+  "err.noAccount": ["계정이 없어요.", "Account not found.", "アカウントがありません。", "账号不存在。"],
+  "err.noCreds": ["저장된 로그인 정보가 없어요. 다시 로그인해 주세요.", "No saved sign-in data. Please sign in again.", "保存されたログイン情報がありません。再ログインしてください。", "没有已保存的登录信息。请重新登录。"],
+  "err.unknownProvider": ["알 수 없는 서비스: {id}", "Unknown service: {id}", "不明なサービス: {id}", "未知服务：{id}"],
+  "err.loginExpired": ["로그인 세션이 없거나 만료됐어요. 처음부터 다시 해 주세요.", "The sign-in session is missing or expired. Please start again.",
+    "ログインセッションがないか期限切れです。最初からやり直してください。", "登录会话不存在或已过期。请重新开始。"],
+  "err.skClaudeOnly": ["sessionKey는 Claude 계정에만 넣을 수 있어요.", "A sessionKey can only be set on Claude accounts.", "sessionKey は Claude アカウントにのみ設定できます。", "只有 Claude 账号可以设置 sessionKey。"],
+  "err.skCantRemove": ["OAuth 로그인이 없는 계정에서는 sessionKey를 지울 수 없어요.", "Can't remove the sessionKey from an account without OAuth sign-in.",
+    "OAuth ログインのないアカウントでは sessionKey を削除できません。", "没有 OAuth 登录的账号不能删除 sessionKey。"],
+  "err.unsupported": ["지원하지 않는 요청: {route}", "Unsupported request: {route}", "未対応のリクエスト: {route}", "不支持的请求：{route}"],
+  "err.noMode": ["연결 방식을 먼저 정해 주세요.", "Choose how to connect first.", "先に接続方法を選んでください。", "请先选择连接方式。"],
+  "err.server": ["서버에 연결하지 못했어요: {msg}", "Couldn't reach the server: {msg}", "サーバーに接続できませんでした: {msg}", "无法连接到服务器：{msg}"],
+  "warn.skExpired": ["sessionKey 만료: {msg}", "sessionKey expired: {msg}", "sessionKey の期限切れ: {msg}", "sessionKey 已过期：{msg}"],
+  "warn.creditsFailed": ["초기화권 조회 실패: {msg}", "Couldn't fetch reset credits: {msg}", "リセット券の取得に失敗: {msg}", "获取重置券失败：{msg}"],
+  "warn.summaryFallback": ["요약 조회 실패, 모델별 조회로 대체: {msg}", "Summary failed, used per-model data instead: {msg}",
+    "概要の取得に失敗したため、モデル別の取得で代替: {msg}", "获取概要失败，已改用按模型查询：{msg}"],
+  "what.claudeOrg": ["claude.ai 조직 조회", "claude.ai organizations", "claude.ai 組織の取得", "claude.ai 组织查询"],
+  "what.claudeWeb": ["claude.ai 사용량", "claude.ai usage", "claude.ai 使用量", "claude.ai 用量"],
+  "what.claudeRefresh": ["Claude 토큰 갱신", "Claude token refresh", "Claude トークン更新", "Claude 令牌刷新"],
+  "what.claudeUsage": ["Claude 사용량", "Claude usage", "Claude 使用量", "Claude 用量"],
+  "what.codexRefresh": ["Codex 토큰 갱신", "Codex token refresh", "Codex トークン更新", "Codex 令牌刷新"],
+  "what.codexUsage": ["Codex 사용량", "Codex usage", "Codex 使用量", "Codex 用量"],
+  "what.codexCredits": ["Codex 초기화권", "Codex reset credits", "Codex リセット券", "Codex 重置券"],
+  "what.googleRefresh": ["Google 토큰 갱신", "Google token refresh", "Google トークン更新", "Google 令牌刷新"],
 }
 
 // ───────────────────────── 로고 (LobeHub Icons, MIT) ─────────────────────────

@@ -109,7 +109,14 @@ Antigravity 의 Google OAuth 클라이언트 ID/Secret 은 앱 안에 들어 있
 
 - **메인**: 계정마다 카드 하나. 앱은 공간이 넓어서 한도(현재 세션·이번 주·Fable 이번 주 등)를 모두 한 줄씩 가로 전체로 보여주고, 남은 시간은 퍼센트 바로 옆에 붙습니다. 카드를 누르면 계정 화면으로 갑니다.
 - **계정 화면**: 한도별 남은 시간과 초기화 날짜·시각(요일 포함), 초기화권 한 장씩, 추가 사용량. 아래에서 새로고침·이름·위젯에 표시·sessionKey·다시 로그인·삭제를 합니다.
-- **설정**: 연결 방식(이 iPhone / 내 서버), Antigravity 로그인 설정, 알림, 위젯 미리보기, Claude 로고.
+- **설정**: 연결 방식(이 iPhone / 내 서버), Antigravity 로그인 설정, 알림, 위젯 미리보기, 언어, Claude 로고.
+
+### 언어
+
+한국어 · English · 日本語 · 简体中文 을 지원합니다. 기본은 기기 언어를 따르고(지원하지 않는 언어면 영어), **설정 → 언어**에서 바꿀 수 있습니다. 앱·위젯·알림 문구와 시간 표기(예: `2시간 12분` / `2h 12m` / `2時間12分`)가 함께 바뀝니다.
+
+- 문구는 스크립트 끝의 `STRINGS` 에 `[한국어, English, 日本語, 简体中文]` 순서로 한 줄씩 있습니다. 언어를 더하려면 `LANG_CODES`·`LANG_INFO` 에 추가하고 각 줄에 번역을 붙이세요(빠진 칸은 영어로 대신합니다).
+- 서버 모드에서 서버가 보내는 오류 문구는 한국어 그대로입니다.
 
 ## 위젯
 
@@ -167,6 +174,8 @@ AIUSAGE_API_KEY=$(openssl rand -hex 16) AIUSAGE_DATA_DIR=./data python3 -m aiusa
 # 스크립트 기기 모드 (Node 18+, 가짜 업스트림과 Scriptable 스텁 위에서 실행)
 node scriptable/tests/device.test.mjs
 ```
+
+`scriptable/tests/device.test.mjs` 는 모든 문구가 4개 언어로 채워졌는지도 확인합니다.
 
 새 서비스를 추가하려면 서버는 `server/aiusage/providers/` 에 `Provider` 를 구현해 `providers/__init__.py` 에 등록하고, 기기 모드는 스크립트의 `DEVICE_PROVIDERS` 에 같은 형식으로 추가하세요. API 명세는 [`docs/API.md`](docs/API.md) 에 있습니다.
 

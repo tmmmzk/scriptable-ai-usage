@@ -14,8 +14,8 @@
 | PATCH | `/v1/accounts/{id}` | `label`, `enabled`, `order`, `session_key`(Claude, `""` 이면 제거) |
 | DELETE | `/v1/accounts/{id}` | 계정과 저장된 토큰 삭제 |
 | POST | `/v1/accounts/{id}/refresh` | 즉시 다시 조회 |
-| POST | `/v1/logins` | OAuth 로그인 시작: `{"provider":"codex","label":"회사"}`, 재로그인은 `account_id` 추가 |
-| POST | `/v1/logins/{login_id}/complete` | `{"input":"<리다이렉트 URL 또는 code#state>"}` |
+| POST | `/v1/logins` | OAuth 로그인 시작: `{"provider":"codex","label":"회사"}`, 재로그인은 `account_id` 추가(다른 서비스 계정이면 404) |
+| POST | `/v1/logins/{login_id}/complete` | `{"input":"<리다이렉트 URL 또는 code#state>"}`. 로그인 세션이 없거나 만료됐으면 404 |
 
 ## `GET /v1/usage`
 

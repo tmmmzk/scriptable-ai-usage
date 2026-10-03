@@ -8,7 +8,7 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any, Mapping, Optional
 
-from .errors import BlockedError, ProviderError, RateLimitedError
+from .errors import AuthError, BlockedError, ProviderError, RateLimitedError
 
 
 @dataclass
@@ -70,6 +70,12 @@ def request(
     except (urllib.error.URLError, socket.timeout, TimeoutError, ConnectionError) as exc:
         reason = getattr(exc, "reason", exc)
         raise ProviderError(f"네트워크 오류: {reason}") from exc
+
+
+def raise_for_auth(resp: Response, what: str) -> None:
+    """401/403(Cloudflare 챌린지 제외) → 재로그인 필요."""
+    if resp.status in (401, 403) and not resp.cloudflare_challenge:
+        raise AuthError(f"{what} 인증 실패(HTTP {resp.status})", resp.status)
 
 
 def raise_for_common(resp: Response, what: str) -> None:

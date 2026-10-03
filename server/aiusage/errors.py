@@ -29,3 +29,7 @@ class BlockedError(ProviderError):
 
 class LoginError(Exception):
     """로그인 완료 단계에서 사용자 입력이나 토큰 교환이 잘못된 경우."""
+
+
+class LoginNotFound(LoginError):
+    """로그인 세션이 없거나 만료됐을 때. 클라이언트는 404 로 '처음부터 다시'를 알아본다."""

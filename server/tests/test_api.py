@@ -126,6 +126,11 @@ class ApiTest(unittest.TestCase):
         with urllib.request.urlopen(self.base + "/healthz") as r:
             self.assertEqual(r.status, 200)
 
+    def test_login_not_found_is_404(self):
+        # 클라이언트는 언어와 상관없이 404 로 '로그인을 처음부터 다시'를 알아본다
+        self.assertEqual(self.call("POST", "/v1/logins/nope/complete", {"input": "x#y"})[0], 404)
+        self.assertEqual(self.call("POST", "/v1/logins", {"provider": "codex", "account_id": "claude_none"})[0], 404)
+
     def test_providers(self):
         status, body = self.call("GET", "/v1/providers")
         info = {p["id"]: p for p in body["providers"]}
