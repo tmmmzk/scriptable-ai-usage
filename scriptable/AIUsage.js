@@ -483,7 +483,7 @@ function accountHeader(stack, acc, opts) {
   }
   row.addSpacer()
   const rc = acc.reset_credits
-  if (rc && rc.available > 0) addPill(row, `🎟 ${rc.available}`)
+  if (rc && rc.available > 0) addPill(row, `초기화권 ${rc.available}`)
   if (acc.status === "needs_login") {
     row.addSpacer(4)
     addPill(row, "🔑 재로그인", C.bad)
@@ -515,11 +515,9 @@ function windowCell(parent, w, width, dim) {
   if (until) addText(top, ` · ${until}`, Font.systemFont(11), C.sub, { minScale: 0.7, opacity: 0.75 })
   top.addSpacer()
   const pctColorFor = dim || w.used_percent == null || w.used_percent < 70 ? C.text : pctColor(w.used_percent)
-  const num = w.used_percent == null ? "–" : String(Math.round(w.used_percent))
-  addText(top, num, Font.semiboldSystemFont(14), pctColorFor, { opacity: dim ? 0.55 : 1 })
-  if (w.used_percent != null) addText(top, "%", Font.semiboldSystemFont(10), pctColorFor, { opacity: dim ? 0.55 : 1 })
+  addText(top, fmtPct(w.used_percent), Font.semiboldSystemFont(12), pctColorFor, { opacity: dim ? 0.55 : 1 })
 
-  cell.addSpacer(5)
+  cell.addSpacer(4)
   const bar = cell.addImage(barImage(w.used_percent, width, 6, dim ? C.sub : pctColor(w.used_percent)))
   bar.imageSize = new Size(width, 6)
   return cell
@@ -544,13 +542,13 @@ function accountBlock(parent, acc, family, inner, extraPill) {
   }
   if (family === "small") {
     // 소형: 폭이 좁아 두 한도를 위아래로
-    for (const w of ws) {
-      block.addSpacer(10)
+    ws.forEach((w, i) => {
+      block.addSpacer(i === 0 ? 6 : 10)
       windowCell(block, w, inner, dim)
-    }
+    })
     return block
   }
-  block.addSpacer(7)
+  block.addSpacer(4)
   const row = block.addStack()
   row.layoutHorizontally()
   const cellW = Math.floor((inner - CELL_GAP) / 2)
@@ -666,8 +664,8 @@ function buildAccessoryWidget(result, family, param) {
     row.addSpacer(5)
     addText(row, acc.label || short(acc), Font.systemFont(12), Color.white(), { minScale: 0.7 })
     row.addSpacer()
-    const rc = acc.reset_credits && acc.reset_credits.available ? ` 🎟${acc.reset_credits.available}` : ""
-    addText(row, `${parts(acc)}${rc}`, Font.mediumSystemFont(12), Color.white(), { minScale: 0.7 })
+    // 잠금 화면은 폭이 좁아 초기화권은 생략
+    addText(row, parts(acc), Font.mediumSystemFont(12), Color.white(), { minScale: 0.7 })
   })
   return w
 }
@@ -920,7 +918,7 @@ function drawPills(ctx, pills, right, y, pal) {
 function accountPills(acc, enabled) {
   const pills = []
   const rc = acc.reset_credits
-  if (rc && rc.available > 0) pills.push({ text: `🎟 ${rc.available}` })
+  if (rc && rc.available > 0) pills.push({ text: `초기화권 ${rc.available}` })
   if (acc.status === "needs_login") pills.push({ text: "🔑 재로그인", color: C.bad })
   else if (acc.status === "partial") pills.push({ text: "⚠︎ 일부 실패", color: C.warn })
   else if (acc.status && !["ok", "pending"].includes(acc.status)) pills.push({ text: `⚠︎ ${STATUS_TEXT[acc.status] || "오류"}`, color: C.bad })
@@ -941,31 +939,31 @@ function drawBarCell(ctx, w, x, y, width, dim, p) {
   const full = `${windowTitle(w)}${until ? " · " + until : ""}`
   const label = estWidth(full, 12) <= width - 52 ? full : windowTitle(w)
   drawTextAt(ctx, label, x, y + 3, width - 48, 16, Font.systemFont(12), p.sub)
-  drawTextAt(ctx, pct == null ? "–" : `${Math.round(pct)}%`, x + width - 60, y, 60, 20, Font.semiboldSystemFont(16),
+  drawTextAt(ctx, pct == null ? "–" : `${Math.round(pct)}%`, x + width - 60, y + 1, 60, 20, Font.semiboldSystemFont(14),
     dim || pct == null || pct < 70 ? p.text : pctColor(pct), "right")
-  fillRound(ctx, new Rect(x, y + 25, width, 7), 3.5, p.track)
-  if (pct != null && pct > 0) fillRound(ctx, new Rect(x, y + 25, Math.max(7, (width * Math.min(100, pct)) / 100), 7), 3.5, color)
+  fillRound(ctx, new Rect(x, y + 23, width, 7), 3.5, p.track)
+  if (pct != null && pct > 0) fillRound(ctx, new Rect(x, y + 23, Math.max(7, (width * Math.min(100, pct)) / 100), 7), 3.5, color)
 }
 
 // 메인 화면의 계정 카드
 function accountCardImage(acc, enabled) {
   const p = pal()
   const W = cardWidth()
-  const H = 96
+  const H = 82
   const ctx = newCtx(W, H)
   const dim = acc.stale || acc.status === "needs_login"
   drawLogo(ctx, acc.provider, 0, 6, 24, p)
   const right = drawPills(ctx, accountPills(acc, enabled), W, 8, p)
-  drawTextAt(ctx, acc.label, 34, 3, right - 40, 22, Font.semiboldSystemFont(17), dim ? p.sub : p.text)
-  drawTextAt(ctx, [acc.provider_name, acc.email].filter(Boolean).join(" · "), 34, 24, right - 40, 16, Font.systemFont(12), p.sub)
+  drawTextAt(ctx, acc.label, 34, 2, right - 40, 22, Font.semiboldSystemFont(17), dim ? p.sub : p.text)
+  drawTextAt(ctx, [acc.provider_name, acc.email].filter(Boolean).join(" · "), 34, 22, right - 40, 16, Font.systemFont(12), p.sub)
   const ws = primaryWindows(acc)
   if (!ws.length) {
-    drawTextAt(ctx, acc.error || STATUS_TEXT[acc.status] || "데이터 없음", 0, 56, W, 32, Font.systemFont(13), p.sub)
+    drawTextAt(ctx, acc.error || STATUS_TEXT[acc.status] || "데이터 없음", 0, 46, W, 32, Font.systemFont(13), p.sub)
     return ctx.getImage()
   }
   const gap = 18
   const cw = ws.length > 1 ? (W - gap) / 2 : W
-  ws.forEach((w, i) => drawBarCell(ctx, w, i * (cw + gap), 54, cw, dim, p))
+  ws.forEach((w, i) => drawBarCell(ctx, w, i * (cw + gap), 44, cw, dim, p))
   return ctx.getImage()
 }
 
@@ -1039,23 +1037,23 @@ async function accountDetail(accountId) {
     }
 
     const rc = usage.reset_credits
+    // Antigravity 는 초기화권이 없으므로 섹션을 아예 표시하지 않는다
+    const showResets = acc.provider !== "antigravity"
     const rcHead = new UITableRow()
     rcHead.isHeader = true
     rcHead.addText("초기화권")
-    table.addRow(rcHead)
+    if (showResets) table.addRow(rcHead)
     const rcRow = new UITableRow()
     rcRow.height = 54
     if (rc) {
       const exp = (rc.expirations || []).map((e) => (e ? fmtDate(e) : "만료 없음"))
-      rcRow.addText(`🎟 ${rc.available}개 사용 가능`, rc.available ? `만료: ${exp.join(", ")}` : "지금 쓸 수 있는 초기화권이 없습니다")
+      rcRow.addText(`${rc.available}개 사용 가능`, rc.available ? `만료: ${exp.join(", ")}` : "지금 쓸 수 있는 초기화권이 없습니다")
     } else if (acc.auth && acc.auth.reset_credits_supported === false && acc.provider === "claude") {
       rcRow.addText("sessionKey 가 없어 조회하지 않음", "아래 'sessionKey 설정'으로 추가하세요.")
-    } else if (acc.provider === "antigravity") {
-      rcRow.addText("지원하지 않음", "")
     } else {
       rcRow.addText("없음 / 대상 아님", "")
     }
-    table.addRow(rcRow)
+    if (showResets) table.addRow(rcRow)
 
     const extra = usage.extra || {}
     if (extra.extra_usage || extra.credits) {
@@ -1199,7 +1197,7 @@ async function mainMenu() {
 
     for (const acc of accounts) {
       const u = usage[acc.id] || { ...acc, windows: [] }
-      const r = imageRow(accountCardImage({ ...acc, ...u, label: acc.label }, acc.enabled), 116)
+      const r = imageRow(accountCardImage({ ...acc, ...u, label: acc.label }, acc.enabled), 102)
       r.dismissOnSelect = false
       r.onSelect = async () => {
         await accountDetail(acc.id)
