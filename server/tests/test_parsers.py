@@ -151,13 +151,13 @@ class AntigravityParserTest(unittest.TestCase):
                             {"bucketId": "gwk", "displayName": "Weekly Limit Remaining",
                              "remaining": {"case": "remainingFraction", "value": 0.25}},
                             {"bucketId": "g5h", "displayName": "Five Hour Limit Remaining", "remainingFraction": 0.8,
-                             "resetTime": "2026-10-03T05:00:00Z", "window": "FIVE_HOUR"},
+                             "resetTime": "2026-10-03T05:00:00Z", "window": "ROLLING"},  # window 로는 모르면 이름에서
                             {"bucketId": "off", "disabled": True, "remainingFraction": 1},
                         ],
                     },
                     {"displayName": "Claude/GPT", "buckets": [
                         {"id": "cwk", "displayName": "Weekly Limit Remaining", "remainingFraction": 0.1},
-                        {"id": "c5h", "displayName": "Five Hour Limit Remaining", "remainingFraction": 1.0},
+                        {"id": "c5h", "displayName": "Five Hour Limit Remaining", "remainingFraction": 1.0, "window": {"duration": "18000s"}},
                         {"id": "odd", "displayName": "Bonus Limit Remaining", "remainingFraction": 1.0},
                     ]},
                 ]

@@ -254,9 +254,14 @@ _HOUR_WORDS = {"ONE": 1, "TWO": 2, "THREE": 3, "FOUR": 4, "FIVE": 5, "SIX": 6, "
 
 
 def _window_seconds(window: Any) -> Optional[int]:
-    """"FIVE_HOUR", "5h", "Five Hour Limit Remaining", "WEEKLY" 등 → 초."""
-    w = str(window or "").upper()
-    if "HOUR" in w:
+    """"FIVE_HOUR", "5h", "18000s", "Five Hour Limit Remaining", "WEEKLY" 등 → 초. 모르면 None."""
+    if not isinstance(window, str):
+        return None
+    w = window.upper()
+    sec = re.fullmatch(r"(\d+)S", w)
+    if sec:
+        return int(sec.group(1))
+    if "HOUR" in w or re.search(r"\d\s*H\b", w):
         m = re.search(r"(\d+)", w)
         word = next((k for k in _HOUR_WORDS if k in w), None)
         return (int(m.group(1)) if m else _HOUR_WORDS[word] if word else 5) * 3600
@@ -288,7 +293,8 @@ def parse_quota_summary(data: Any) -> list[dict]:
                     remaining = rem.get("value")
             # 이름은 'Weekly Limit Remaining' 처럼 길게 오므로, 기간을 알면 Claude·Codex 처럼 5시간·주간으로 쓴다
             name = bucket.get("displayName") or bucket.get("name") or bid
-            seconds = _window_seconds(bucket.get("window") or name)
+            # window 값으로 기간을 모르면 이름에서 찾는다(예: window 는 다른 형식, 이름은 'Five Hour Limit Remaining')
+            seconds = _window_seconds(bucket.get("window")) or _window_seconds(name)
             label = window_label(seconds) if seconds else (re.sub(r"\s*(limit\s*)?remaining\s*$", "", name, flags=re.I) or name)
             windows.append(
                 make_window(

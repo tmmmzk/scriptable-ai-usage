@@ -786,10 +786,13 @@ function resolvePlan(info, creds) {
 const usedFromRemaining = (f) => (num(f) == null ? null : clampPct((1 - num(f)) * 100))
 const slug = (text) => text.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "") || "q"
 
-// "FIVE_HOUR", "5h", "Five Hour Limit Remaining", "WEEKLY" 등 → 초
+// "FIVE_HOUR", "5h", "18000s", "Five Hour Limit Remaining", "WEEKLY" 등 → 초. 모르면 null.
 function agWindowSeconds(window) {
-  const w = String(window || "").toUpperCase()
-  if (w.includes("HOUR")) {
+  if (typeof window !== "string") return null
+  const w = window.toUpperCase()
+  const sec = w.match(/^(\d+)S$/)
+  if (sec) return Number(sec[1])
+  if (w.includes("HOUR") || /\d\s*H\b/.test(w)) {
     const m = w.match(/(\d+)/)
     const words = { ONE: 1, TWO: 2, THREE: 3, FOUR: 4, FIVE: 5, SIX: 6, EIGHT: 8, TWELVE: 12 }
     const word = Object.keys(words).find((k) => w.includes(k))
@@ -815,7 +818,8 @@ function agQuotaSummary(data) {
           : b.remaining.case === "remainingFraction" ? b.remaining.value : null
       // 이름은 'Weekly Limit Remaining' 처럼 길게 오므로, 기간을 알면 Claude·Codex 처럼 5시간·주간으로 쓴다
       const name = b.displayName || b.name || id
-      const seconds = agWindowSeconds(b.window || name)
+      // window 값으로 기간을 모르면 이름에서 찾는다(예: window 는 다른 형식, 이름은 'Five Hour Limit Remaining')
+      const seconds = agWindowSeconds(b.window) || agWindowSeconds(name)
       out.push(makeWindow(`${slug(gname)}:${id}`, seconds ? windowLabel(seconds) : name.replace(/\s*(limit\s*)?remaining\s*$/i, "") || name,
         usedFromRemaining(remaining), isoOf(msOf(b.resetTime)), { seconds, group: gname }))
     }
@@ -2057,11 +2061,13 @@ const checkRow = (title, checked, onSelect, subtitle) =>
 const linkRow = (title, onSelect, subtitle) => valueRow(title, "›", onSelect, { subtitle, valueWidth: 12 })
 
 // 눌러도 표가 닫히지 않는 메뉴 행
-function actionRow(title, onSelect, color) {
+function actionRow(title, onSelect, color, subtitle) {
   const r = new UITableRow()
   r.dismissOnSelect = false
-  const c = r.addText(title)
+  if (subtitle) r.height = 62
+  const c = r.addText(title, subtitle || null)
   if (color) c.titleColor = color
+  c.subtitleColor = Color.gray()
   r.onSelect = onSelect
   return r
 }
@@ -2077,11 +2083,11 @@ function imageRow(img, height) {
 function providerRow(provider, title, subtitle, onSelect) {
   const r = new UITableRow()
   r.dismissOnSelect = false
-  r.height = 62
+  r.height = subtitle ? 62 : 52
   const img = providerRowLogo(provider)
-  if (img) r.addImage(img).widthWeight = 14
-  const c = r.addText(title, subtitle)
-  c.widthWeight = 78
+  if (img) r.addImage(img).widthWeight = 10
+  const c = r.addText(title, subtitle || null)
+  c.widthWeight = 82
   c.subtitleColor = Color.gray()
   const v = r.addText("›")
   v.widthWeight = 8
@@ -2093,14 +2099,14 @@ function providerRow(provider, title, subtitle, onSelect) {
 
 // '복사한 값 붙여넣기' + '직접 입력' 두 줄. submit(값) 은 빈 값이면 emptyMessage 로 알린다.
 // 클립보드에 글자가 없으면 Pasteboard.paste() 는 null 이므로 빈 글자로 바꿔 넘긴다(취소와 구분).
-function pasteRows(page, { pasteTitle, promptTitle, promptHint, secure, emptyMessage, submit }) {
+function pasteRows(page, { pasteTitle, pasteHint, promptTitle, promptHint, secure, emptyMessage, submit }) {
   const send = async (raw) => {
     if (raw == null) return // 입력창에서 취소
     const value = String(raw).trim()
     if (!value) throw new Error(emptyMessage)
     await submit(value)
   }
-  page.add(actionRow(pasteTitle, page.run(() => send(Pasteboard.paste() ?? "")), ACCENT))
+  page.add(actionRow(pasteTitle, page.run(() => send(Pasteboard.paste() ?? "")), ACCENT, pasteHint))
   page.add(actionRow(t("common.typeIn"), page.run(async () => send(await prompt(promptTitle, promptHint, { secure })))))
 }
 
@@ -2346,8 +2352,8 @@ function resetCreditImage(item, index, provider) {
 // 서비스 고르기 줄의 로고. 표 칸은 이미지를 칸 크기에 맞춰 늘리므로,
 // 오른쪽에 투명한 여백을 둔 그림을 만들어 로고는 작게, 이름과는 떨어지게 한다.
 function providerRowLogo(provider) {
-  const ctx = newCtx(46, 30)
-  drawLogo(ctx, provider, 0, 3, 24)
+  const ctx = newCtx(34, 26)
+  drawLogo(ctx, provider, 0, 1, 24)
   return ctx.getImage()
 }
 
@@ -2357,8 +2363,6 @@ async function serverPage() {
   const draft = { server: kcGet(KC_SERVER, ""), apiKey: kcGet(KC_KEY, "") }
   let connected = false
   await openPage(t("server.title"), async (page) => {
-    page.add(noteRow(t("server.note")))
-    page.add(headerRow(t("server.section")))
     page.add(valueRow(t("server.address"), draft.server || t("common.enter"), page.run(async () => {
       const v = await prompt(t("server.addressPrompt"), t("server.addressExample"), { value: draft.server, placeholder: "https://" })
       if (v != null) draft.server = v.replace(/\/+$/, "")
@@ -2374,7 +2378,7 @@ async function serverPage() {
       Keychain.set(KC_KEY, draft.apiKey)
       setMode("server")
       connected = true
-      page.ok(t("server.connected"), t("server.connectedDetail"))
+      page.ok(t("server.connected"))
     }), ACCENT))
   })
   return connected
@@ -2385,7 +2389,6 @@ async function antigravityPage() {
     const cur = kcJSON(KC_AG_CLIENT, {})
     const save = (patch) => Keychain.set(KC_AG_CLIENT, JSON.stringify({ ...cur, ...patch }))
     page.add(noteRow(t("ag.help")))
-    page.add(headerRow(t("ag.section")))
     page.add(valueRow("Client ID", cur.id ? `${cur.id.slice(0, 12)}…` : t("common.enter"), page.run(async () => {
       const v = await prompt("Client ID", t("ag.idHelp"), { value: cur.id || "" })
       if (v != null) save({ id: v })
@@ -2394,7 +2397,7 @@ async function antigravityPage() {
       const v = await prompt("Client Secret", t("ag.secretHelp"), { secure: true, value: cur.secret || "" })
       if (v != null) save({ secret: v })
     })))
-    if (agClient()) page.add(noticeRow({ title: t("ag.ready"), detail: t("ag.readyDetail"), color: C.ok }))
+    if (agClient()) page.add(noticeRow({ title: t("ag.ready"), color: C.ok }))
   })
   return !!agClient()
 }
@@ -2404,16 +2407,15 @@ async function addAccountPage() {
   let added = false
   await openPage(t("add.title"), async (page) => {
     const { providers } = await api("GET", "/v1/providers")
-    page.add(headerRow(t("add.which")))
     for (const p of providers) {
-      page.add(providerRow(p.id, p.name, p.configured ? t(`provider.desc.${p.id}`) : t("provider.needsSetup"), page.run(async () => {
+      page.add(providerRow(p.id, p.name, p.configured ? null : t("provider.needsSetup"), page.run(async () => {
         if (!p.configured) {
           if (!(getConfig().device && p.id === "antigravity")) throw new Error(p.reason)
           if (!(await antigravityPage())) return
         }
         if (await loginPage(p.id)) {
           added = true
-          page.ok(t("add.done"), t("add.doneDetail"))
+          page.ok(t("add.done"))
         }
       })))
     }
@@ -2421,7 +2423,8 @@ async function addAccountPage() {
   return added
 }
 
-// 새 계정 추가 또는 기존 계정 다시 로그인(accountId). 끝나면 결과를 페이지 맨 위에 보여준다.
+// 새 계정 추가 또는 기존 계정 다시 로그인(accountId). 단계(방식 → 로그인 → 붙여넣기)마다 머리로 묶고,
+// 끝난 단계에는 ✓ 를 붙인다. 이름은 마지막에 선택으로.
 async function loginPage(provider, { accountId = null } = {}) {
   const st = { label: "", method: "oauth", login: null, done: false }
   const name = providerName(provider)
@@ -2429,13 +2432,13 @@ async function loginPage(provider, { accountId = null } = {}) {
   const finish = (page, acc) => {
     st.done = true
     const status = acc.status === "ok" ? "" : t("login.status", { status: statusText(acc.status) })
-    page.ok(accountId ? t("login.relogged") : t("add.done"), `${acc.label}${acc.email ? ` (${acc.email})` : ""}${status}${t("login.closeToList")}`)
+    page.ok(accountId ? t("login.relogged") : t("add.done"), `${acc.label}${acc.email ? ` (${acc.email})` : ""}${status}`)
   }
 
-  const submitCode = async (page, input) => {
+  const submitCode = async (input) => {
     if (!st.login) throw new Error(t("login.needOpenFirst"))
     try {
-      finish(page, await api("POST", `/v1/logins/${st.login.login_id}/complete`, { input }, 60))
+      return await api("POST", `/v1/logins/${st.login.login_id}/complete`, { input }, 60)
     } catch (e) {
       if (e.status === 404) st.login = null // 로그인 세션이 끝났으면 처음부터
       throw e
@@ -2444,34 +2447,37 @@ async function loginPage(provider, { accountId = null } = {}) {
 
   await openPage(t(accountId ? "login.titleRelogin" : "login.titleAdd", { provider: name }), async (page) => {
     if (st.done) return
-    if (!accountId) {
-      page.add(headerRow(t("common.name")))
-      page.add(valueRow(t("login.nameRow"), st.label || t("login.nameDefault"), page.run(async () => {
-        const v = await prompt(t("common.name"), t("login.namePrompt"), { value: st.label, placeholder: t("login.namePlaceholder") })
-        if (v != null) st.label = v
-      }), { valueWidth: 50 }))
-    }
+    let n = 0
+    const step = (key, done) => page.add(headerRow(`${++n}. ${t(key)}${done ? "  ✓" : ""}`))
+
     if (provider === "claude" && !accountId) {
-      page.add(headerRow(t("login.method")))
+      step("login.stepMethod")
       page.add(checkRow(t("login.oauth"), st.method === "oauth", page.run(() => (st.method = "oauth")), t("login.oauthDesc")))
       page.add(checkRow("sessionKey", st.method === "session_key", page.run(() => (st.method = "session_key")), t("login.skDesc")))
     }
     if (st.method === "session_key") {
-      page.add(headerRow("sessionKey"))
+      step("login.stepKey")
       page.add(noteRow(t("sk.help")))
       pasteRows(page, { pasteTitle: t("sk.paste"), promptTitle: "sessionKey", promptHint: t("sk.prompt"), secure: true,
         emptyMessage: t("sk.clipEmpty"),
         submit: async (key) => finish(page, await api("POST", "/v1/accounts", { provider, session_key: key, label: st.label || undefined }, 60)) })
-      return
+    } else {
+      step("login.stepLogin", !!st.login)
+      page.add(actionRow(t(st.login ? "login.reopen" : "login.open"), page.run(async () => {
+        if (!st.login) st.login = await api("POST", "/v1/logins", { provider, label: st.label || undefined, account_id: accountId || undefined })
+        Safari.open(st.login.authorize_url)
+      }), ACCENT, t(`login.openDesc.${provider}`)))
+      step(provider === "claude" ? "login.stepCode" : "login.stepUrl")
+      pasteRows(page, { pasteTitle: t("login.paste"), pasteHint: t(`login.pasteDesc.${provider}`), promptTitle: t("common.typeIn"),
+        promptHint: t(`login.hint.${provider}`), emptyMessage: t("login.clipEmpty"), submit: async (input) => finish(page, await submitCode(input)) })
     }
-    page.add(headerRow(t("login.section")))
-    page.add(noteRow(t(`login.guide.${provider}`)))
-    page.add(actionRow(t("login.open"), page.run(async () => {
-      if (!st.login) st.login = await api("POST", "/v1/logins", { provider, label: st.label || undefined, account_id: accountId || undefined })
-      Safari.open(st.login.authorize_url)
-    }), ACCENT))
-    pasteRows(page, { pasteTitle: t("login.paste"), promptTitle: t("common.typeIn"), promptHint: t(`login.hint.${provider}`),
-      emptyMessage: t("login.clipEmpty"), submit: (input) => submitCode(page, input) })
+    if (!accountId) {
+      page.add(headerRow(t("login.nameOptional")))
+      page.add(valueRow(t("common.name"), st.label || t("login.nameDefault"), page.run(async () => {
+        const v = await prompt(t("common.name"), t("login.namePrompt"), { value: st.label, placeholder: t("login.namePlaceholder") })
+        if (v != null) st.label = v
+      }), { valueWidth: 50 }))
+    }
   })
   return st.done
 }
@@ -2489,14 +2495,14 @@ async function sessionKeyPage(accountId, { hasKey = false, canDelete = false } =
       submit: async (key) => {
         await api("PATCH", `/v1/accounts/${accountId}`, { session_key: key }, 60)
         done = true
-        page.ok(t("common.didSave"), t("sk.savedDetail"))
+        page.ok(t("common.didSave"))
       } })
     if (hasKey && canDelete) {
       page.add(actionRow(t("sk.delete"), page.run(async () => {
         if (!(await confirm(t("sk.delete"), t("sk.deleteConfirm"), t("common.delete"), true))) return
         await api("PATCH", `/v1/accounts/${accountId}`, { session_key: "" })
         done = true
-        page.ok(t("common.didDelete"), t("sk.backToAccount"))
+        page.ok(t("common.didDelete"))
       }), C.bad))
     }
   })
@@ -2534,7 +2540,7 @@ async function accountDetail(accountId) {
       page.add(headerRow(items.length ? t("detail.creditsN", { n: items.length }) : t("detail.credits")))
       if (items.length) items.forEach((item, i) => page.add(imageRow(resetCreditImage(item, i, acc.provider), 70)))
       else if (rc) page.add(textRow(t("detail.noCredits")))
-      else if (acc.provider === "claude" && !acc.auth.session_key) page.add(textRow(t("detail.needSk"), t("detail.needSkDesc")))
+      else if (acc.provider === "claude" && !acc.auth.session_key) page.add(textRow(t("detail.needSk"), null, { color: Color.gray() }))
       else page.add(textRow(t("detail.creditsFailed"), usage.error))
     }
 
@@ -2567,7 +2573,7 @@ async function accountDetail(accountId) {
       if (!(await confirm(t("detail.delete"), t("detail.deleteConfirm", { name: acc.label, where }), t("common.delete"), true))) return
       await api("DELETE", `/v1/accounts/${accountId}`)
       deleted = true
-      page.ok(t("common.didDelete"), t("detail.backToList"))
+      page.ok(t("common.didDelete"))
     }), C.bad))
   })
 }
@@ -2581,11 +2587,11 @@ async function settingsPage() {
       if (mode === "device") return
       setMode("device")
       page.ok(t("mode.deviceSet"), t("mode.deviceSetDetail"))
-    }), t("mode.deviceDesc")))
+    })))
     const server = mode === "server" ? kcGet(KC_SERVER, "").replace(/^https?:\/\//, "") : ""
     page.add(checkRow(t("mode.server"), mode === "server", page.run(async () => {
-      if (await serverPage()) page.ok(t("mode.serverSet"), t("mode.serverSetDetail"))
-    }), server || t("mode.serverDesc")))
+      if (await serverPage()) page.ok(t("mode.serverSet"))
+    }), server || null))
     if (mode === "device") {
       page.add(valueRow(t("ag.title"), agClient() ? t("common.set") : t("common.none"), page.run(antigravityPage), { valueWidth: 25 }))
     }
@@ -2652,7 +2658,6 @@ async function updatePage() {
         page.ok(t("update.restored", { v }), t("update.restart"))
       })))
     }
-    page.add(noteRow(t("update.note")))
   })
 }
 
@@ -2680,7 +2685,6 @@ async function notifyPage() {
 
     page.add(headerRow(t("notify.threshold")))
     for (const v of [80, 90, 95]) page.add(checkRow(t("notify.thresholdRow", { n: v }), cur.threshold === v, page.run(() => save({ threshold: v }))))
-    page.add(noteRow(t("notify.thresholdNote")))
 
     page.add(headerRow(t("notify.testSection")))
     page.add(actionRow(t("notify.test"), page.run(async () => {
@@ -2693,7 +2697,6 @@ async function notifyPage() {
 
 async function widgetPreviewPage() {
   await openPage(t("settings.preview"), async (page) => {
-    page.add(noteRow(t("preview.note")))
     for (const size of ["small", "medium", "large"]) {
       page.add(linkRow(t(`preview.${size}`), page.run(async () => {
         const w = buildHomeWidget(await loadUsage(false), size, "")
@@ -2742,7 +2745,7 @@ async function mainMenu() {
     }
 
     page.add(headerRow(t("main.accounts", { n: accounts.length })))
-    if (!accounts.length) page.add(textRow(t("main.noAccounts"), t("main.noAccountsDesc")))
+    if (!accounts.length) page.add(textRow(t("main.noAccounts"), null, { color: Color.gray() }))
     await measureTexts(accounts.flatMap((acc) => measureItemsFor(acc, usage[acc.id], "card")))
     for (const acc of accounts) {
       const u = usage[acc.id] || { ...acc, windows: [] }
@@ -2874,46 +2877,35 @@ const STRINGS = {
   "win.byModel": ["모델별", "By model", "モデル別", "按模型"],
 
   // 위젯
-  "widget.empty": ["표시할 계정이 없어요. Scriptable 앱에서 계정을 추가해 주세요.", "No accounts to show. Add one in the Scriptable app.",
-    "表示するアカウントがありません。Scriptable アプリで追加してください。", "没有可显示的账号。请在 Scriptable 应用中添加。"],
+  "widget.empty": ["표시할 계정이 없어요. 앱에서 추가해 주세요.", "No accounts to show. Add one in the app.", "表示するアカウントがありません。アプリで追加してください。", "没有可显示的账号。请在应用中添加。"],
   "widget.updated": ["{ago} 확인", "Updated {ago}", "更新: {ago}", "{ago}更新"],
-  "widget.more": ["+{n}개 더 · 위젯 Parameter로 고를 수 있어요", "+{n} more · choose with the widget Parameter",
-    "他 {n} 件 · ウィジェットの Parameter で選べます", "还有 {n} 个 · 可用小组件 Parameter 选择"],
-  "widget.setup": ["Scriptable 앱에서 이 스크립트를 한 번 실행해 연결 방식을 골라 주세요.", "Run this script once in the Scriptable app and choose how to connect.",
-    "Scriptable アプリでこのスクリプトを一度実行し、接続方法を選んでください。", "请先在 Scriptable 应用中运行一次此脚本并选择连接方式。"],
+  "widget.more": ["+{n}개 더", "+{n} more", "他 {n} 件", "还有 {n} 个"],
+  "widget.setup": ["앱에서 한 번 실행해 연결 방식을 골라 주세요.", "Open the script in the app once to set it up.", "アプリで一度実行して接続方法を選んでください。", "请先在应用中运行一次并选择连接方式。"],
   "widget.loadFailed": ["불러오지 못했어요. {msg}", "Couldn't load. {msg}", "読み込めませんでした。{msg}", "加载失败。{msg}"],
 
   // 알림
   "notify.high.title": ["사용량 경고", "Usage warning", "使用量の警告", "用量警告"],
-  "notify.high.desc": ["대표 한도가 기준을 넘었을 때", "When a main limit passes the threshold", "主な上限がしきい値を超えたとき", "主要额度超过阈值时"],
+  "notify.high.desc": ["사용량이 경고 기준을 넘었을 때", "When usage passes the warning threshold", "使用量が警告のしきい値を超えたとき", "用量超过警告阈值时"],
   "notify.reset.title": ["초기화 알림", "Reset", "リセット", "重置提醒"],
-  "notify.reset.desc": ["기준을 넘긴 한도가 예정 시각에 초기화될 때", "When a limit that passed the threshold resets on schedule",
-    "しきい値を超えた上限が予定どおりリセットされたとき", "超过阈值的额度按时重置时"],
+  "notify.reset.desc": ["기준을 넘긴 한도가 초기화될 때", "When a limit that passed the threshold resets", "しきい値を超えた上限がリセットされたとき", "超过阈值的额度重置时"],
   "notify.early.title": ["조기 초기화 감지", "Early reset", "早期リセットの検知", "提前重置"],
-  "notify.early.desc": ["예정보다 일찍 한도가 초기화됐을 때", "When a limit resets earlier than scheduled", "予定より早く上限がリセットされたとき", "额度比预定时间更早重置时"],
+  "notify.early.desc": ["예정보다 일찍 초기화됐을 때", "When a limit resets earlier than scheduled", "予定より早くリセットされたとき", "比预定时间更早重置时"],
   "notify.login.title": ["재로그인 필요", "Sign-in needed", "再ログインが必要", "需要重新登录"],
-  "notify.login.desc": ["로그인이 만료돼 사용량을 못 가져올 때", "When sign-in expires and usage can't be fetched", "ログインが切れて使用量を取得できないとき", "登录过期、无法获取用量时"],
+  "notify.login.desc": ["로그인이 만료됐을 때", "When sign-in expires", "ログインの有効期限が切れたとき", "登录过期时"],
   "notify.credit.title": ["초기화권 만료 임박", "Reset credit expiring", "リセット券の期限が近い", "重置券即将过期"],
   "notify.credit.desc": ["초기화권이 하루 안에 만료될 때", "When a reset credit expires within a day", "リセット券が1日以内に期限切れになるとき", "重置券将在一天内过期时"],
-  "notify.login.body": ["다시 로그인해야 사용량을 가져올 수 있어요. 눌러서 열어 주세요.", "Sign in again to keep fetching usage. Tap to open.",
-    "使用量を取得するには再ログインが必要です。タップして開いてください。", "需要重新登录才能获取用量。点按打开。"],
+  "notify.login.body": ["로그인이 만료됐어요. 다시 로그인해 주세요.", "Your sign-in expired. Please sign in again.", "ログインの有効期限が切れました。再ログインしてください。", "登录已过期，请重新登录。"],
   "notify.early.body": ["{name} 한도가 예정보다 일찍 초기화됐어요. ({from}% → {to}%)", "{name} reset earlier than scheduled. ({from}% → {to}%)",
     "{name} が予定より早くリセットされました。({from}% → {to}%)", "{name} 比预定时间更早重置了。({from}% → {to}%)"],
   "notify.high.body": ["{name} 사용량이 {pct}%예요.", "{name} is at {pct}%.", "{name} の使用量が {pct}% です。", "{name} 已用 {pct}%。"],
   "notify.high.resetIn": [" {t} 후 초기화돼요.", " Resets in {t}.", " {t}後にリセットされます。", " {t}后重置。"],
   "notify.high.resetSoon": [" 곧 초기화돼요.", " Resets soon.", " まもなくリセットされます。", " 即将重置。"],
-  "notify.reset.body": ["{name} 한도가 초기화됐어요. 다시 쓸 수 있어요.", "{name} has reset. You're good to go.",
-    "{name} がリセットされました。また使えます。", "{name} 已重置，可以继续使用了。"],
-  "notify.credit.body": ["초기화권 1장이 {t} 뒤에 만료돼요. 필요하면 그 전에 쓰세요.", "A reset credit expires in {t}. Use it before then if you need it.",
-    "リセット券が {t}後に期限切れになります。必要ならその前に使ってください。", "一张重置券将在 {t}后过期，如有需要请提前使用。"],
-  "notify.test.body": ["알림이 이렇게 와요.", "This is how notifications look.", "通知はこのように届きます。", "通知会像这样显示。"],
+  "notify.reset.body": ["{name} 한도가 초기화됐어요.", "{name} has reset.", "{name} がリセットされました。", "{name} 已重置。"],
+  "notify.credit.body": ["초기화권 1장이 {t} 뒤에 만료돼요.", "A reset credit expires in {t}.", "リセット券が {t}後に期限切れになります。", "一张重置券将在 {t}后过期。"],
+  "notify.test.body": ["테스트 알림이에요.", "This is a test notification.", "テスト通知です。", "这是一条测试通知。"],
 
   // 서버 연결
   "server.title": ["서버 연결", "Server", "サーバー接続", "服务器连接"],
-  "server.note": ["직접 띄운 사용량 서버에 연결해요. 서버를 설치하는 방법은 저장소의 README에 있어요.",
-    "Connect to your own usage server. See the repository README for how to set it up.",
-    "自分で立てた使用量サーバーに接続します。設置方法はリポジトリの README にあります。", "连接你自己部署的用量服务器。部署方法见仓库的 README。"],
-  "server.section": ["서버", "Server", "サーバー", "服务器"],
   "server.address": ["주소", "Address", "アドレス", "地址"],
   "server.addressPrompt": ["서버 주소", "Server address", "サーバーアドレス", "服务器地址"],
   "server.addressExample": ["예) https://ai.example.com", "e.g. https://ai.example.com", "例) https://ai.example.com", "例如 https://ai.example.com"],
@@ -2923,89 +2915,62 @@ const STRINGS = {
   "server.save": ["연결 확인하고 저장", "Test connection and save", "接続を確認して保存", "测试连接并保存"],
   "server.missing": ["주소와 API 키를 모두 넣어 주세요.", "Enter both the address and the API key.", "アドレスと API キーを両方入力してください。", "请填写地址和 API 密钥。"],
   "server.connected": ["연결됐어요", "Connected", "接続しました", "已连接"],
-  "server.connectedDetail": ["이 화면을 닫으면 서버의 계정 목록을 보여 드려요.", "Close this screen to see the server's accounts.",
-    "この画面を閉じるとサーバーのアカウント一覧を表示します。", "关闭此页面即可查看服务器上的账号。"],
 
   // Antigravity 로그인 설정
   "ag.title": ["Antigravity 로그인 설정", "Antigravity sign-in setup", "Antigravity ログイン設定", "Antigravity 登录设置"],
-  "ag.help": [
-    "PC에 설치한 Antigravity 앱의 resources/app/out/main.js 파일에서 두 값을 찾아 넣어 주세요.\n• Client ID: ….apps.googleusercontent.com 으로 끝나는 값\n• Client Secret: GOCSPX- 로 시작하는 값",
-    "Find these two values in resources/app/out/main.js of the Antigravity app installed on your computer.\n• Client ID: ends with ….apps.googleusercontent.com\n• Client Secret: starts with GOCSPX-",
-    "PC にインストールした Antigravity アプリの resources/app/out/main.js から2つの値を探して入力してください。\n• Client ID: ….apps.googleusercontent.com で終わる値\n• Client Secret: GOCSPX- で始まる値",
-    "请在电脑上安装的 Antigravity 应用的 resources/app/out/main.js 中找到以下两个值。\n• Client ID：以 ….apps.googleusercontent.com 结尾\n• Client Secret：以 GOCSPX- 开头",
-  ],
-  "ag.section": ["Google OAuth 클라이언트", "Google OAuth client", "Google OAuth クライアント", "Google OAuth 客户端"],
+  "ag.help": ["Antigravity 앱의 resources/app/out/main.js 에 들어 있는 값이에요.", "Both values are in resources/app/out/main.js of the Antigravity app.", "どちらも Antigravity アプリの resources/app/out/main.js にあります。", "两个值都在 Antigravity 应用的 resources/app/out/main.js 中。"],
   "ag.idHelp": ["….apps.googleusercontent.com 으로 끝나는 값이에요.", "Ends with ….apps.googleusercontent.com.",
     "….apps.googleusercontent.com で終わる値です。", "以 ….apps.googleusercontent.com 结尾。"],
   "ag.secretHelp": ["GOCSPX- 로 시작하는 값이에요.", "Starts with GOCSPX-.", "GOCSPX- で始まる値です。", "以 GOCSPX- 开头。"],
   "ag.ready": ["준비됐어요", "Ready", "準備できました", "已就绪"],
-  "ag.readyDetail": ["이제 Antigravity 계정을 추가할 수 있어요.", "You can now add an Antigravity account.", "Antigravity アカウントを追加できます。", "现在可以添加 Antigravity 账号了。"],
 
   // 계정 추가·로그인
   "add.title": ["계정 추가", "Add account", "アカウントを追加", "添加账号"],
-  "add.which": ["어떤 서비스를 추가할까요?", "Which service?", "どのサービスを追加しますか？", "要添加哪个服务？"],
   "add.done": ["계정을 추가했어요", "Account added", "アカウントを追加しました", "已添加账号"],
-  "add.doneDetail": ["이 화면을 닫으면 목록에 보여요.", "Close this screen to see it in the list.", "この画面を閉じると一覧に表示されます。", "关闭此页面后即可在列表中看到。"],
-  "provider.desc.claude": ["사용량 · 초기화권 · 플랜", "Usage · reset credits · plan", "使用量 · リセット券 · プラン", "用量 · 重置券 · 套餐"],
-  "provider.desc.codex": ["사용량 · 초기화권 · 플랜", "Usage · reset credits · plan", "使用量 · リセット券 · プラン", "用量 · 重置券 · 套餐"],
-  "provider.desc.antigravity": ["모델 그룹별 사용량", "Usage by model group", "モデルグループ別の使用量", "按模型分组的用量"],
   "provider.needsSetup": ["설정이 필요해요", "Needs setup", "設定が必要です", "需要设置"],
+  "login.stepMethod": ["로그인 방식", "Method", "ログイン方法", "登录方式"],
+  "login.stepLogin": ["로그인", "Sign in", "ログイン", "登录"],
+  "login.stepCode": ["코드 붙여넣기", "Paste the code", "コードを貼り付け", "粘贴代码"],
+  "login.stepUrl": ["주소 붙여넣기", "Paste the URL", "URL を貼り付け", "粘贴网址"],
+  "login.stepKey": ["sessionKey 붙여넣기", "Paste the sessionKey", "sessionKey を貼り付け", "粘贴 sessionKey"],
+  "login.reopen": ["로그인 페이지 다시 열기", "Open sign-in page again", "ログインページをもう一度開く", "重新打开登录页面"],
+  "login.openDesc.claude": ["로그인하고 승인하면 코드가 나와요", "Sign in and approve to get a code", "ログインして承認するとコードが表示されます", "登录并授权后会显示代码"],
+  "login.openDesc.codex": ["ChatGPT 계정으로 로그인", "Sign in with your ChatGPT account", "ChatGPT アカウントでログイン", "使用 ChatGPT 账号登录"],
+  "login.openDesc.antigravity": ["Antigravity에서 쓰는 Google 계정으로 로그인", "Sign in with the Google account you use in Antigravity", "Antigravity で使う Google アカウントでログイン", "使用 Antigravity 的 Google 账号登录"],
+  "login.pasteDesc.claude": ["'Copy Code'로 복사한 코드", "The code copied with 'Copy Code'", "'Copy Code' でコピーしたコード", "用 'Copy Code' 复制的代码"],
+  "login.pasteDesc.codex": ["로그인 후 열리지 않는 화면의 주소 전체", "The full URL of the page that won't load after sign-in", "ログイン後に開けない画面の URL 全体", "登录后无法打开的页面的完整网址"],
+  "login.pasteDesc.antigravity": ["로그인 후 열리지 않는 화면의 주소 전체", "The full URL of the page that won't load after sign-in", "ログイン後に開けない画面の URL 全体", "登录后无法打开的页面的完整网址"],
+  "login.nameOptional": ["이름 (선택)", "Name (optional)", "名前（任意）", "名称（可选）"],
   "login.titleAdd": ["{provider} 계정 추가", "Add {provider} account", "{provider} アカウントを追加", "添加 {provider} 账号"],
   "login.titleRelogin": ["{provider} 다시 로그인", "Sign in to {provider} again", "{provider} に再ログイン", "重新登录 {provider}"],
-  "login.guide.claude": ["로그인하고 승인하면 코드가 나와요. 'Copy Code'로 복사한 뒤 돌아와서 '붙여넣기'를 누르세요.",
-    "Sign in and approve to get a code. Copy it with 'Copy Code', come back, and tap 'Paste'.",
-    "ログインして承認するとコードが表示されます。'Copy Code' でコピーしてから戻り、「貼り付け」を押してください。",
-    "登录并授权后会显示代码。用 'Copy Code' 复制后返回，点“粘贴”。"],
-  "login.guide.codex": ["ChatGPT로 로그인하면 '연결할 수 없음' 페이지가 떠요. 정상이에요. 주소창의 주소를 통째로 복사한 뒤 돌아와서 '붙여넣기'를 누르세요.",
-    "After signing in with ChatGPT you'll land on a page that can't be opened. That's expected. Copy the whole URL from the address bar, come back, and tap 'Paste'.",
-    "ChatGPT でログインすると「接続できません」というページが開きます。これで正常です。アドレスバーの URL を丸ごとコピーして戻り、「貼り付け」を押してください。",
-    "用 ChatGPT 登录后会打开一个无法访问的页面，这是正常的。复制地址栏中的完整网址，返回后点“粘贴”。"],
-  "login.guide.antigravity": ["Antigravity에서 쓰는 Google 계정으로 로그인하면 열리지 않는 페이지로 이동해요. 정상이에요. 주소창의 주소를 통째로 복사한 뒤 돌아와서 '붙여넣기'를 누르세요.",
-    "Sign in with the Google account you use in Antigravity and you'll land on a page that won't open. That's expected. Copy the whole URL from the address bar, come back, and tap 'Paste'.",
-    "Antigravity で使う Google アカウントでログインすると、開けないページに移動します。これで正常です。アドレスバーの URL を丸ごとコピーして戻り、「貼り付け」を押してください。",
-    "用你在 Antigravity 中使用的 Google 账号登录后，会跳到一个打不开的页面，这是正常的。复制地址栏中的完整网址，返回后点“粘贴”。"],
   "login.hint.claude": ["복사한 코드 (code#state 형식)", "The copied code (code#state)", "コピーしたコード (code#state 形式)", "复制的代码（code#state 格式）"],
   "login.hint.codex": ["localhost:1455 로 시작하는 주소 전체", "The full URL starting with localhost:1455", "localhost:1455 で始まる URL 全体", "以 localhost:1455 开头的完整网址"],
   "login.hint.antigravity": ["127.0.0.1:8585 로 시작하는 주소 전체", "The full URL starting with 127.0.0.1:8585", "127.0.0.1:8585 で始まる URL 全体", "以 127.0.0.1:8585 开头的完整网址"],
   "login.relogged": ["다시 로그인했어요", "Signed in again", "再ログインしました", "已重新登录"],
   "login.status": [" · 상태: {status}", " · Status: {status}", " · 状態: {status}", " · 状态：{status}"],
-  "login.closeToList": [" · 닫으면 목록으로 돌아가요.", " · Close to go back to the list.", " · 閉じると一覧に戻ります。", " · 关闭即可返回列表。"],
-  "login.needOpenFirst": ["먼저 '1. 로그인 페이지 열기'로 로그인해 주세요.", "Sign in first with '1. Open sign-in page'.",
-    "先に「1. ログインページを開く」でログインしてください。", "请先通过“1. 打开登录页面”登录。"],
+  "login.needOpenFirst": ["먼저 로그인 페이지를 열어 로그인해 주세요.", "Open the sign-in page and sign in first.", "先にログインページを開いてログインしてください。", "请先打开登录页面并登录。"],
   "login.clipEmpty": ["클립보드가 비어 있어요. 로그인 페이지에서 다시 복사해 주세요.", "The clipboard is empty. Copy it again from the sign-in page.",
     "クリップボードが空です。ログインページでもう一度コピーしてください。", "剪贴板为空。请在登录页面重新复制。"],
-  "login.nameRow": ["위젯에 보일 이름", "Name shown in the widget", "ウィジェットに表示する名前", "在小组件中显示的名称"],
   "login.nameDefault": ["이메일 앞부분", "Email prefix", "メールの前半", "邮箱前缀"],
   "login.namePrompt": ["비워 두면 이메일 앞부분을 써요.", "Leave empty to use the part of the email before @.",
     "空欄ならメールアドレスの @ より前を使います。", "留空则使用邮箱 @ 前的部分。"],
   "login.namePlaceholder": ["예) 개인", "e.g. Personal", "例) 個人", "例如 个人"],
-  "login.method": ["추가 방식", "Method", "追加方法", "添加方式"],
   "login.oauth": ["OAuth 로그인 (추천)", "OAuth sign-in (recommended)", "OAuth ログイン（おすすめ）", "OAuth 登录（推荐）"],
-  "login.oauthDesc": ["사용량과 플랜을 안정적으로 가져와요. 초기화권은 나중에 sessionKey로 더할 수 있어요.",
-    "Reliable usage and plan. You can add a sessionKey later for reset credits.",
-    "使用量とプランを安定して取得します。リセット券は後から sessionKey で追加できます。", "稳定获取用量和套餐。之后可以添加 sessionKey 来查看重置券。"],
-  "login.skDesc": ["사용량과 초기화권까지 가져와요. claude.ai 쿠키 값이 필요해요.", "Usage plus reset credits. Needs a claude.ai cookie.",
-    "使用量とリセット券まで取得します。claude.ai の Cookie が必要です。", "可获取用量和重置券。需要 claude.ai 的 Cookie。"],
-  "login.section": ["로그인", "Sign in", "ログイン", "登录"],
-  "login.open": ["1. 로그인 페이지 열기", "1. Open sign-in page", "1. ログインページを開く", "1. 打开登录页面"],
-  "login.paste": ["2. 복사한 값 붙여넣기", "2. Paste what you copied", "2. コピーした値を貼り付け", "2. 粘贴复制的内容"],
+  "login.oauthDesc": ["사용량·플랜 (초기화권은 나중에 sessionKey로)", "Usage and plan (reset credits later via sessionKey)", "使用量・プラン（リセット券は後で sessionKey で）", "用量和套餐（重置券之后用 sessionKey）"],
+  "login.skDesc": ["사용량·초기화권 (claude.ai 쿠키 필요)", "Usage and reset credits (needs a claude.ai cookie)", "使用量・リセット券（claude.ai の Cookie が必要）", "用量和重置券（需要 claude.ai Cookie）"],
+  "login.open": ["로그인 페이지 열기", "Open sign-in page", "ログインページを開く", "打开登录页面"],
+  "login.paste": ["복사한 값 붙여넣기", "Paste from clipboard", "コピーした値を貼り付け", "粘贴剪贴板内容"],
 
   // sessionKey
-  "sk.help": ["초기화권은 claude.ai 웹에서만 확인할 수 있어서 sessionKey가 필요해요. PC 브라우저로 claude.ai에 로그인한 뒤 개발자 도구 → Application → Cookies → https://claude.ai 에서 'sessionKey' 값(sk-ant-…)을 복사해 주세요.",
-    "Reset credits are only available on the claude.ai website, so a sessionKey is needed. Sign in to claude.ai in a desktop browser, open Developer Tools → Application → Cookies → https://claude.ai and copy the 'sessionKey' value (sk-ant-…).",
-    "リセット券は claude.ai のウェブでしか確認できないため sessionKey が必要です。PC のブラウザで claude.ai にログインし、開発者ツール → Application → Cookies → https://claude.ai から 'sessionKey' の値 (sk-ant-…) をコピーしてください。",
-    "重置券只能在 claude.ai 网页上查看，因此需要 sessionKey。在电脑浏览器登录 claude.ai，打开开发者工具 → Application → Cookies → https://claude.ai，复制 'sessionKey' 的值（sk-ant-…）。"],
+  "sk.help": ["PC 브라우저로 claude.ai에 로그인한 뒤 개발자 도구 → Application → Cookies → claude.ai 에서 sessionKey 값(sk-ant-…)을 복사하세요.", "Sign in to claude.ai in a desktop browser, then copy the sessionKey value (sk-ant-…) from Developer Tools → Application → Cookies → claude.ai.", "PC のブラウザで claude.ai にログインし、開発者ツール → Application → Cookies → claude.ai から sessionKey の値 (sk-ant-…) をコピーしてください。", "在电脑浏览器登录 claude.ai，然后在开发者工具 → Application → Cookies → claude.ai 中复制 sessionKey 的值（sk-ant-…）。"],
   "sk.paste": ["복사한 sessionKey 붙여넣기", "Paste copied sessionKey", "コピーした sessionKey を貼り付け", "粘贴复制的 sessionKey"],
   "sk.prompt": ["sk-ant- 로 시작하는 값이에요.", "Starts with sk-ant-.", "sk-ant- で始まる値です。", "以 sk-ant- 开头。"],
   "sk.clipEmpty": ["클립보드가 비어 있어요. sessionKey를 다시 복사해 주세요.", "The clipboard is empty. Copy the sessionKey again.",
     "クリップボードが空です。sessionKey をもう一度コピーしてください。", "剪贴板为空。请重新复制 sessionKey。"],
-  "sk.savedDetail": ["초기화권을 확인했어요. 닫으면 계정 화면으로 돌아가요.", "Reset credits checked. Close to go back to the account.",
-    "リセット券を確認しました。閉じるとアカウント画面に戻ります。", "已查询重置券。关闭即可返回账号页面。"],
   "sk.replace": ["새 값으로 바꾸기", "Replace", "新しい値に置き換える", "替换为新值"],
   "sk.add": ["추가하기", "Add", "追加する", "添加"],
   "sk.delete": ["sessionKey 삭제", "Delete sessionKey", "sessionKey を削除", "删除 sessionKey"],
   "sk.deleteConfirm": ["초기화권이 더 이상 표시되지 않아요.", "Reset credits will no longer be shown.", "リセット券が表示されなくなります。", "将不再显示重置券。"],
-  "sk.backToAccount": ["닫으면 계정 화면으로 돌아가요.", "Close to go back to the account.", "閉じるとアカウント画面に戻ります。", "关闭即可返回账号页面。"],
   "sk.rowDesc": ["초기화권을 확인할 때 써요", "Used to check reset credits", "リセット券の確認に使います", "用于查看重置券"],
 
   // 계정 화면
@@ -3018,7 +2983,6 @@ const STRINGS = {
   "detail.creditsN": ["초기화권 {n}개", "Reset credits ({n})", "リセット券 {n}枚", "重置券 {n} 张"],
   "detail.noCredits": ["지금 쓸 수 있는 초기화권이 없어요", "No reset credits available right now", "今使えるリセット券はありません", "目前没有可用的重置券"],
   "detail.needSk": ["sessionKey가 있어야 확인할 수 있어요", "A sessionKey is needed to check", "確認には sessionKey が必要です", "需要 sessionKey 才能查看"],
-  "detail.needSkDesc": ["아래 'sessionKey'에서 추가할 수 있어요.", "Add it under 'sessionKey' below.", "下の「sessionKey」から追加できます。", "可在下方“sessionKey”中添加。"],
   "detail.creditsFailed": ["확인하지 못했어요", "Couldn't check", "確認できませんでした", "无法查询"],
   "detail.extraUsage": ["추가 사용량", "Extra usage", "追加使用量", "额外用量"],
   "detail.creditBalance": ["크레딧", "Credits", "クレジット", "积分"],
@@ -3036,7 +3000,6 @@ const STRINGS = {
     "{name} とログイン情報を{where}から削除しますか？", "要从{where}删除 {name} 及其登录信息吗？"],
   "detail.whereDevice": ["이 iPhone", "this iPhone", "この iPhone", "此 iPhone"],
   "detail.whereServer": ["서버", "the server", "サーバー", "服务器"],
-  "detail.backToList": ["이 화면을 닫으면 목록으로 돌아가요.", "Close this screen to go back to the list.", "この画面を閉じると一覧に戻ります。", "关闭此页面即可返回列表。"],
   "credit.title": ["사용량 초기화권", "Usage reset credit", "使用量リセット券", "用量重置券"],
   "credit.noExpiry": ["만료 없음", "No expiry", "期限なし", "无期限"],
   "credit.daysLeft": ["{n}일 남음", "{n}d left", "残り{n}日", "剩 {n} 天"],
@@ -3063,7 +3026,7 @@ const STRINGS = {
   "update.current": ["현재 버전", "Current version", "現在のバージョン", "当前版本"],
   "update.latest": ["최신 버전", "Latest version", "最新バージョン", "最新版本"],
   "update.checking": ["확인 중…", "Checking…", "確認中…", "正在检查…"],
-  "update.checkedAt": ["{ago} 확인 · 눌러서 다시 확인", "Checked {ago} · tap to check again", "確認: {ago} · タップで再確認", "{ago}检查 · 点按重新检查"],
+  "update.checkedAt": ["{ago} 확인", "Checked {ago}", "確認: {ago}", "{ago}检查"],
   "update.available": ["{v} 있음", "{v} available", "{v} あり", "有 {v}"],
   "update.banner": ["새 버전이 나왔어요 ({v})", "Version {v} is available", "新しいバージョン {v} があります", "有新版本 {v}"],
   "update.install": ["지금 업데이트 ({v})", "Update now ({v})", "今すぐアップデート ({v})", "立即更新（{v}）"],
@@ -3075,71 +3038,45 @@ const STRINGS = {
   "update.restoreConfirm": ["업데이트하기 전 버전으로 되돌릴까요?", "Go back to the version from before the update?",
     "アップデート前のバージョンに戻しますか？", "要恢复到更新前的版本吗？"],
   "update.restored": ["되돌렸어요 ({v})", "Restored {v}", "{v} に戻しました", "已恢复到 {v}"],
-  "update.note": ["새 버전은 GitHub에서 받아요. 받은 파일이 온전한 스크립트일 때만 바꾸고, 바로 전 버전은 되돌릴 수 있게 남겨 둬요. 앱을 열면 12시간마다 새 버전을 확인해요.",
-    "Updates are downloaded from GitHub. The script is replaced only if the download is a valid script, and the previous version is kept so you can go back. The app checks for a new version every 12 hours when opened.",
-    "新しいバージョンは GitHub から取得します。正しいスクリプトの場合だけ置き換え、直前のバージョンは戻せるように残します。アプリを開くと12時間ごとに確認します。",
-    "新版本从 GitHub 下载。只有下载的是完整脚本时才会替换，并保留上一版本以便恢复。打开应用时每 12 小时检查一次。"],
   "update.fetchFailed": ["새 버전을 받지 못했어요 (HTTP {status})", "Couldn't download the update (HTTP {status})",
     "アップデートをダウンロードできませんでした (HTTP {status})", "无法下载更新（HTTP {status}）"],
   "update.invalid": ["받은 파일이 올바른 스크립트가 아니에요. 잠시 뒤 다시 시도해 주세요.", "The download isn't a valid script. Please try again later.",
     "ダウンロードしたファイルが正しいスクリプトではありません。しばらくしてからもう一度お試しください。", "下载的文件不是有效的脚本。请稍后再试。"],
   "mode.device": ["이 iPhone에서 직접", "Directly on this iPhone", "この iPhone で直接", "直接在此 iPhone 上"],
-  "mode.deviceDesc": ["서버 없이 이 스크립트가 로그인하고 조회해요.", "No server: this script signs in and fetches by itself.",
-    "サーバーなしで、このスクリプトがログインと取得を行います。", "无需服务器，由此脚本登录并获取数据。"],
   "mode.deviceSet": ["이 iPhone에서 직접 가져와요", "Now fetching on this iPhone", "この iPhone で直接取得します", "现在直接在此 iPhone 上获取"],
-  "mode.deviceSetDetail": ["계정 목록은 방식마다 따로예요. 필요하면 계정을 다시 추가해 주세요.", "Each mode has its own account list. Add accounts again if needed.",
-    "アカウント一覧は方法ごとに別です。必要ならアカウントを追加し直してください。", "每种方式的账号列表是分开的。如有需要请重新添加账号。"],
+  "mode.deviceSetDetail": ["계정 목록은 방식마다 따로예요.", "Each mode keeps its own account list.", "アカウント一覧は方法ごとに別です。", "每种方式的账号列表是分开的。"],
   "mode.server": ["내 서버", "My server", "自分のサーバー", "我的服务器"],
-  "mode.serverDesc": ["직접 띄운 서버가 모은 사용량을 받아와요.", "Reads usage collected by your own server.", "自分のサーバーが集めた使用量を受け取ります。", "读取你自己的服务器收集的用量。"],
   "mode.serverSet": ["서버에 연결했어요", "Connected to the server", "サーバーに接続しました", "已连接到服务器"],
-  "mode.serverSetDetail": ["닫으면 서버의 계정 목록을 보여 드려요.", "Close to see the server's accounts.", "閉じるとサーバーのアカウント一覧を表示します。", "关闭即可查看服务器上的账号。"],
 
   // 알림 설정
   "notify.receive": ["알림 받기", "Allow notifications", "通知を受け取る", "接收通知"],
   "notify.types": ["받을 알림", "Notify me about", "受け取る通知", "通知类型"],
   "notify.threshold": ["경고 기준", "Warning threshold", "警告のしきい値", "警告阈值"],
   "notify.thresholdRow": ["{n}% 이상", "{n}% or more", "{n}% 以上", "{n}% 及以上"],
-  "notify.thresholdNote": ["사용량 경고와 초기화 알림은 위젯 대표 한도(현재 세션·이번 주 등)가 이 기준을 넘었을 때만 와요.",
-    "Usage warnings and reset alerts only fire when a main limit (current session, this week, …) passes this threshold.",
-    "使用量の警告とリセット通知は、主な上限（現在のセッション・今週など）がこのしきい値を超えたときだけ届きます。",
-    "用量警告和重置提醒仅在主要额度（当前会话、本周等）超过此阈值时发送。"],
   "notify.testSection": ["테스트", "Test", "テスト", "测试"],
   "notify.test": ["테스트 알림 보내기", "Send a test notification", "テスト通知を送る", "发送测试通知"],
   "notify.sent": ["보냈어요", "Sent", "送信しました", "已发送"],
   "notify.sentDetail": ["알림이 오지 않으면 iPhone 설정 → 앱 → Scriptable → 알림을 확인해 주세요.",
     "If nothing arrives, check iPhone Settings → Apps → Scriptable → Notifications.",
     "届かない場合は iPhone の設定 → アプリ → Scriptable → 通知 を確認してください。", "如果没有收到，请检查 iPhone 设置 → App → Scriptable → 通知。"],
-  "notify.timingNote": ["위젯이 새로 고쳐질 때(약 15분마다)와 앱을 열 때 확인해요. 그래서 조기 초기화는 몇 분 늦게 알 수 있어요.",
-    "Checked when the widget refreshes (about every 15 minutes) and when you open the app, so early resets may be noticed a few minutes late.",
-    "ウィジェットの更新時（約15分ごと）とアプリを開いたときに確認するため、早期リセットは数分遅れて分かることがあります。",
-    "在小组件刷新时（约每 15 分钟）和打开应用时检查，因此提前重置可能会晚几分钟发现。"],
+  "notify.timingNote": ["위젯이 새로 고쳐질 때(약 15분마다)와 앱을 열 때 확인해요.", "Checked when the widget refreshes (about every 15 minutes) and when you open the app.", "ウィジェットの更新時（約15分ごと）とアプリを開いたときに確認します。", "在小组件刷新时（约每 15 分钟）和打开应用时检查。"],
 
   // 위젯 미리보기
-  "preview.note": ["홈 화면에 올렸을 때의 모습이에요. 위젯은 약 15분마다 새로 고쳐져요.", "How it looks on the Home Screen. Widgets refresh about every 15 minutes.",
-    "ホーム画面に置いたときの見た目です。ウィジェットは約15分ごとに更新されます。", "放在主屏幕上的样子。小组件约每 15 分钟刷新一次。"],
   "preview.small": ["소형", "Small", "小", "小"],
   "preview.medium": ["중형", "Medium", "中", "中"],
   "preview.large": ["대형", "Large", "大", "大"],
-  "preview.paramNote": ["위젯을 길게 눌러 '위젯 편집' → Parameter에 계정 이름을 쉼표로 적으면 그 계정만 보여요. 예) 개인,회사",
-    "Long-press the widget → Edit Widget → enter account names separated by commas in Parameter to show only those. e.g. Personal,Work",
-    "ウィジェットを長押し →「ウィジェットを編集」→ Parameter にアカウント名をカンマ区切りで入れると、そのアカウントだけ表示します。例) 個人,仕事",
-    "长按小组件 → “编辑小组件” → 在 Parameter 中用逗号分隔填写账号名称，即可只显示这些账号。例如 个人,工作"],
+  "preview.paramNote": ["위젯 편집 → Parameter에 계정 이름을 쉼표로 적으면 그 계정만 보여요 (예: 개인,회사)", "Edit Widget → enter account names separated by commas in Parameter to show only those (e.g. Personal,Work)", "ウィジェットを編集 → Parameter にアカウント名をカンマ区切りで入れると、そのアカウントだけ表示します（例: 個人,仕事）", "编辑小组件 → 在 Parameter 中用逗号分隔填写账号名称，即可只显示这些账号（例如 个人,工作）"],
 
   // 메인
-  "main.intro": ["Claude · Codex · Antigravity 사용량을 한곳에서 보여 줘요. 먼저 사용량을 어디서 가져올지 골라 주세요. 나중에 설정에서 바꿀 수 있어요.",
-    "See Claude, Codex and Antigravity usage in one place. First, choose where to get usage from. You can change this later in Settings.",
-    "Claude · Codex · Antigravity の使用量をまとめて表示します。まず使用量の取得先を選んでください。あとで設定から変更できます。",
-    "在一处查看 Claude、Codex 和 Antigravity 的用量。请先选择从哪里获取用量，之后可在设置中更改。"],
+  "main.intro": ["사용량을 어디서 가져올지 골라 주세요. 설정에서 언제든 바꿀 수 있어요.", "Choose where to get usage from. You can change it any time in Settings.", "使用量の取得先を選んでください。設定からいつでも変更できます。", "请选择从哪里获取用量。之后可随时在设置中更改。"],
   "main.start": ["시작하기", "Get started", "はじめる", "开始使用"],
-  "main.startDeviceDesc": ["서버 없이 바로 시작해요. 로그인 정보는 키체인에 저장돼요.", "Start right away without a server. Sign-in data is stored in the Keychain.",
-    "サーバーなしですぐ始められます。ログイン情報はキーチェーンに保存されます。", "无需服务器，立即开始。登录信息保存在钥匙串中。"],
+  "main.startDeviceDesc": ["로그인 정보는 이 iPhone의 키체인에만 저장돼요", "Sign-in data stays in this iPhone's Keychain", "ログイン情報はこの iPhone のキーチェーンにだけ保存されます", "登录信息仅保存在此 iPhone 的钥匙串中"],
   "main.startServer": ["내 서버에 연결", "Connect to my server", "自分のサーバーに接続", "连接到我的服务器"],
-  "main.startServerDesc": ["직접 띄운 서버의 주소와 API 키가 필요해요.", "Needs your server's address and API key.", "自分のサーバーのアドレスと API キーが必要です。", "需要你的服务器地址和 API 密钥。"],
+  "main.startServerDesc": ["직접 띄운 서버의 주소와 API 키가 필요해요", "Needs your server's address and API key", "自分のサーバーのアドレスと API キーが必要です", "需要你的服务器地址和 API 密钥"],
   "main.cached": ["마지막으로 받은 값이에요", "Showing the last values received", "最後に取得した値です", "显示的是上次获取的数据"],
   "main.serverFailed": ["서버에 연결하지 못했어요", "Couldn't reach the server", "サーバーに接続できませんでした", "无法连接到服务器"],
   "main.accounts": ["계정 ({n})", "Accounts ({n})", "アカウント ({n})", "账号 ({n})"],
   "main.noAccounts": ["아직 계정이 없어요", "No accounts yet", "まだアカウントがありません", "还没有账号"],
-  "main.noAccountsDesc": ["아래 '계정 추가'로 시작해 보세요.", "Start with 'Add account' below.", "下の「アカウントを追加」から始めましょう。", "点下方“添加账号”开始吧。"],
   "main.actions": ["작업", "Actions", "操作", "操作"],
   "main.refreshAll": ["전체 새로고침", "Refresh all", "すべて更新", "全部刷新"],
 

@@ -100,9 +100,9 @@ function upstream(method, url, headers, raw) {
     return ok({ response: { groups: [
       // 실제 응답처럼 이름은 영어로 길게, 주간이 먼저
       { displayName: "Gemini Models", buckets: [{ bucketId: "gw", displayName: "Weekly Limit Remaining", remaining: { case: "remainingFraction", value: 0.9 } },
-        { bucketId: "g5", displayName: "Five Hour Limit Remaining", remainingFraction: 0.4, window: "FIVE_HOUR", resetTime: "2099-01-01T00:00:00Z" }] },
+        { bucketId: "g5", displayName: "Five Hour Limit Remaining", remainingFraction: 0.4, window: "ROLLING", resetTime: "2099-01-01T00:00:00Z" }] },
       { displayName: "Claude and GPT models", buckets: [{ id: "cw", displayName: "Weekly Limit Remaining", remainingFraction: 0.05 },
-        { id: "c5", displayName: "Five Hour Limit Remaining", remainingFraction: 0.7 }] }] } })
+        { id: "c5", displayName: "Five Hour Limit Remaining", remainingFraction: 0.7, window: "18000s" }] }] } })
   }
   if (url === "https://raw.githubusercontent.com/tmmmzk/scriptable-ai-usage/main/scriptable/AIUsage.js")
     return { status: up.script.status, body: up.script.body, headers: {} }
