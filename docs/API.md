@@ -6,7 +6,7 @@
 | 메서드 | 경로 | 설명 |
 |---|---|---|
 | GET | `/healthz` | 헬스 체크 (인증 없음) |
-| GET | `/v1/usage` | 위젯용 사용량. `?refresh=1` 이면 오래된 값을 즉시 다시 조회, `?accounts=개인,codex_ab12` 로 필터 |
+| GET | `/v1/usage` | 위젯용 사용량. `?refresh=1` 이면 오래된 값을 즉시 다시 조회, `?accounts=개인,codex_ab12` 로 필터, `?all=1` 이면 위젯에서 숨긴 계정(`enabled: false`)도 포함 |
 | GET | `/v1/providers` | 지원 서비스, 등록 방식, 서버 설정 여부 |
 | GET | `/v1/accounts` | 계정 목록 (비밀값 제외) |
 | POST | `/v1/accounts` | 수동 등록. 현재는 Claude sessionKey 만: `{"provider":"claude","session_key":"sk-ant-…","label":"개인"}` |
@@ -31,6 +31,7 @@
       "label": "개인",
       "email": "me@example.com",
       "plan": "default_claude_max_20x",
+      "enabled": true,
       "status": "ok",
       "error": null,
       "warnings": [],
@@ -87,10 +88,11 @@
   - `rate_limited`: 업스트림 요청 한도 초과(429)
   - `pending`: 아직 한 번도 조회하지 않음
 - `stale`: 마지막 조회는 실패했고 `windows` 는 이전에 성공한 값입니다.
-- `windows[].primary`: 작은 위젯에 우선 표시할 창입니다(계정당 최대 2개).
+- `enabled`: `false` 면 위젯에서 숨긴 계정입니다(`?all=1` 일 때만 응답에 들어옵니다).
+- `windows[].primary`: 작은 위젯에 우선 표시할 창입니다(계정당 최대 2개). Antigravity 는 첫 그룹(보통 Gemini)의 5시간·주간입니다.
 - `windows[].group`: Antigravity 그룹 이름(예: `Gemini Models`)이나 Codex 추가 한도 이름입니다.
 - `windows[].label`: 화면에 그대로 쓰는 이름입니다. Claude 는 `현재 세션`·`이번 주`·`<모델> 이번 주`, Codex·Antigravity 는 `5시간`·`주간` 처럼 기간으로 표시합니다.
-- `plan`: 서비스가 주는 값 그대로입니다(예: Claude `default_claude_max_20x`·`pro`, Codex `plus`·`team`). 보기 좋은 이름으로 바꾸는 건 위젯이 합니다.
+- `plan`: 서비스가 주는 값 그대로입니다(예: Claude `default_claude_max_20x`·`pro`, Codex `plus`·`team`, Antigravity `g1-pro-tier`(AI Pro)·`Free`). 보기 좋은 이름으로 바꾸는 건 위젯이 합니다.
 - `reset_credits`
   - `null`: 조회하지 않았거나 대상이 아닙니다. Claude 는 sessionKey 가 없으면 `null`, Antigravity 는 항상 `null` 입니다.
   - `available` 이 0 이면 현재 쓸 수 있는 초기화권이 없습니다.

@@ -783,6 +783,9 @@ function pickTier(info) {
 function resolvePlan(info, creds) {
   const plan = (info.planInfo || {}).planType
   if (plan) return plan
+  // Google AI Pro/Ultra 구독은 currentTier 가 free/standard 여도 paidTier 에 g1-pro-tier 처럼 온다
+  const paid = (info.paidTier || {}).id
+  if (paid) return paid
   const tier = (info.currentTier || {}).id
   const hosted = jwtClaims(creds.id_token).hd
   return { "standard-tier": "Paid", "free-tier": hosted ? "Workspace" : "Free", "legacy-tier": "Legacy" }[tier]
@@ -792,11 +795,14 @@ function resolvePlan(info, creds) {
 const usedFromRemaining = (f) => (num(f) == null ? null : clampPct((1 - num(f)) * 100))
 const slug = (text) => text.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "") || "q"
 
+// "FIVE_HOUR", "5h", "Five Hour Limit Remaining", "WEEKLY" 등 → 초
 function agWindowSeconds(window) {
   const w = String(window || "").toUpperCase()
   if (w.includes("HOUR")) {
     const m = w.match(/(\d+)/)
-    return m ? Number(m[1]) * 3600 : 5 * 3600
+    const words = { ONE: 1, TWO: 2, THREE: 3, FOUR: 4, FIVE: 5, SIX: 6, EIGHT: 8, TWELVE: 12 }
+    const word = Object.keys(words).find((k) => w.includes(k))
+    return (m ? Number(m[1]) : word ? words[word] : 5) * 3600
   }
   if (w.includes("WEEK")) return 7 * 86400
   if (w.includes("DAY")) return 86400
@@ -816,8 +822,11 @@ function agQuotaSummary(data) {
       if (remaining == null && b.remaining && typeof b.remaining === "object")
         remaining = b.remaining.remainingFraction != null ? b.remaining.remainingFraction
           : b.remaining.case === "remainingFraction" ? b.remaining.value : null
-      out.push(makeWindow(`${slug(gname)}:${id}`, b.displayName || b.name || id, usedFromRemaining(remaining),
-        isoOf(msOf(b.resetTime)), { seconds: agWindowSeconds(b.window), group: gname }))
+      // 이름은 'Weekly Limit Remaining' 처럼 길게 오므로, 기간을 알면 Claude·Codex 처럼 5시간·주간으로 쓴다
+      const name = b.displayName || b.name || id
+      const seconds = agWindowSeconds(b.window || name)
+      out.push(makeWindow(`${slug(gname)}:${id}`, seconds ? windowLabel(seconds) : name.replace(/\s*(limit\s*)?remaining\s*$/i, "") || name,
+        usedFromRemaining(remaining), isoOf(msOf(b.resetTime)), { seconds, group: gname }))
     }
   }
   return out
@@ -842,11 +851,14 @@ function agQuotaBuckets(data) {
     makeWindow(`model:${id}`, id, usedFromRemaining(best[id].remainingFraction), isoOf(msOf(best[id].resetTime)), { group: "모델별" }))
 }
 
-// 작은 위젯에 보여줄 대표 창: 사용률이 가장 높은 것부터 2개
-function agMarkPrimary(windows) {
-  windows.filter((w) => w.used_percent != null).sort((a, b) => b.used_percent - a.used_percent)
-    .slice(0, 2).forEach((w) => (w.primary = true))
-  return windows
+// 그룹 순서는 그대로, 그룹 안에서는 짧은 기간부터(5시간 → 주간). 대표 창은 첫 그룹(보통 Gemini)의 앞 2개.
+const bySeconds = (a, b) => (a.window_seconds || Infinity) - (b.window_seconds || Infinity)
+
+function agOrder(windows) {
+  const groups = [...new Set(windows.map((w) => w.group))]
+  const out = groups.flatMap((g) => windows.filter((w) => w.group === g).sort(bySeconds))
+  out.filter((w) => w.group === groups[0]).slice(0, 2).forEach((w) => (w.primary = true))
+  return out
 }
 
 async function agPost(method, token, body) {
@@ -949,7 +961,7 @@ const antigravityProvider = {
         usage.windows = agQuotaBuckets(await agPost("retrieveUserQuota", creds.access_token, body))
       }
     }
-    agMarkPrimary(usage.windows)
+    usage.windows = agOrder(usage.windows)
     return usage
   },
 }
@@ -1083,7 +1095,7 @@ function devPublic(acc) {
 
 function devUsageEntry(acc) {
   const snap = devGetSnap(acc.id) || {}
-  return { ...devCommon(acc, snap), warnings: snap.warnings || [],
+  return { ...devCommon(acc, snap), enabled: acc.enabled !== false, warnings: snap.warnings || [],
     stale: !!snap.stale, windows: snap.windows || [], reset_credits: snap.reset_credits || null, extra: snap.extra || {} }
 }
 
@@ -1127,7 +1139,9 @@ async function deviceApi(method, path, body) {
       // ?accounts=개인,claude_ab12 처럼 이름이나 id 로 거를 수 있다(서버와 같음)
       const q = (path.match(/[?&]accounts=([^&]*)/) || [])[1]
       const only = q ? decodeURIComponent(q).split(",").map((x) => x.trim().toLowerCase()).filter(Boolean) : null
-      const accounts = devAccounts().filter((a) => a.enabled !== false
+      // 위젯에서 숨긴 계정은 빼고 준다. 앱은 ?all=1 로 모두 받는다.
+      const all = /[?&]all=1/.test(path)
+      const accounts = devAccounts().filter((a) => (all || a.enabled !== false)
         && (!only || only.includes(a.id.toLowerCase()) || only.includes(String(a.label).toLowerCase())))
       const minAge = /[?&]refresh=1/.test(path) ? DEV_MIN_REFRESH_MS : DEV_AUTO_REFRESH_MS
       await Promise.all(accounts.map((a) => devRefreshAccount(a, minAge)))
@@ -1259,9 +1273,11 @@ function writeCache(data) {
   } catch (e) {}
 }
 
-async function loadUsage(refresh = false) {
+// all: 위젯에서 숨긴 계정까지(앱). 캐시는 앱과 위젯이 같이 쓰므로 위젯은 그릴 때 한 번 더 거른다.
+async function loadUsage(refresh = false, { all = false } = {}) {
   try {
-    const data = await api("GET", `/v1/usage${refresh ? "?refresh=1" : ""}`, undefined, refresh ? 40 : 15)
+    const query = [refresh && "refresh=1", all && "all=1"].filter(Boolean).join("&")
+    const data = await api("GET", `/v1/usage${query ? `?${query}` : ""}`, undefined, refresh ? 40 : 15)
     writeCache(data)
     return { data: cleanUsage(data), offline: false }
   } catch (e) {
@@ -1344,6 +1360,8 @@ const PLAN_NAMES = {
   free: "Free", plus: "Plus", pro: "Pro", max: "Max", team: "Team", business: "Business",
   enterprise: "Enterprise", edu: "Edu", paid: "Paid", workspace: "Workspace", legacy: "Legacy",
   claude_max: "Max", claude_pro: "Pro",
+  // Antigravity(Gemini Code Assist) 등급
+  "g1-pro-tier": "AI Pro", "g1-ultra-tier": "AI Ultra", "standard-tier": "Paid", "free-tier": "Free", "legacy-tier": "Legacy",
 }
 
 function planLabel(plan, provider) {
@@ -1354,25 +1372,43 @@ function planLabel(plan, provider) {
   if (PLAN_NAMES[key]) return PLAN_NAMES[key]
   const m = key.match(/max[_ ]?(\d+)x/)
   if (m) return `Max ${m[1]}x`
+  const g1 = key.match(/^g1-(\w+)-tier$/) // 새 Google One 등급(예: g1-plus-tier)
+  if (g1) return `AI ${g1[1][0].toUpperCase()}${g1[1].slice(1)}`
   return key.replace(/[_-]+/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())
 }
 
 const GROUP_SHORT = { "gemini models": "Gemini", "claude and gpt models": "Claude/GPT" }
 
 function groupShort(group) {
-  const local = localLabel(group) // 번역되는 기준 이름(예: 모델별, 추가 한도)은 통째로
-  return GROUP_SHORT[group.toLowerCase()] || (local !== group ? local : group.split(/\s+/)[0])
+  if (group === "모델별" || group === "추가 한도") return localLabel(group) // 우리가 붙인 이름은 통째로(번역)
+  return GROUP_SHORT[group.toLowerCase()] || group.split(/\s+/)[0]
 }
 
-// compact: 위젯·카드처럼 좁은 칸. 그룹이 있으면 그룹 이름만 쓴다(예: Gemini).
-function windowTitle(w, compact = false) {
+// 그룹이 있으면 짧은 그룹 이름을 앞에 붙인다(예: Gemini 5시간).
+function windowTitle(w) {
   const label = localLabel(w.label)
-  if (!w.group) return label
-  return compact ? groupShort(w.group) : `${groupShort(w.group)} ${label}`
+  return w.group ? `${groupShort(w.group)} ${label}` : label
+}
+
+// 위젯에 보일 Antigravity 그룹(계정 id → 그룹 이름). 이 기기에만 저장한다.
+const KC_WIDGET_GROUPS = "aiusage.widgetGroups"
+const widgetGroups = () => kcJSON(KC_WIDGET_GROUPS, {})
+const setWidgetGroup = (id, group) => Keychain.set(KC_WIDGET_GROUPS, JSON.stringify({ ...widgetGroups(), [id]: group }))
+const windowGroups = (acc) => [...new Set((acc.windows || []).map((w) => w.group).filter(Boolean))]
+
+// 위젯 그룹: 고른 것이 있으면 그것, 없으면 대표 창의 그룹(보통 Gemini)
+function widgetGroupOf(acc) {
+  const ws = acc.windows || []
+  const pref = widgetGroups()[acc.id]
+  return windowGroups(acc).includes(pref) ? pref : (ws.find((w) => w.primary) || ws[0] || {}).group
 }
 
 function primaryWindows(acc, n = 2) {
   const ws = acc.windows || []
+  if (acc.provider === "antigravity") {
+    const group = widgetGroupOf(acc)
+    return ws.filter((w) => w.group === group).sort(bySeconds).slice(0, n)
+  }
   const prim = ws.filter((w) => w.primary)
   return (prim.length ? prim : ws).slice(0, n)
 }
@@ -1542,7 +1578,7 @@ function windowCell(parent, w, width, dim) {
   top.bottomAlignContent()
   top.size = new Size(width, 0)
   // minimumScaleFactor 를 쓰면 줄마다 글자 크기가 달라지므로 쓰지 않는다
-  addText(top, windowTitle(w, true), Font.systemFont(12), C.sub)
+  addText(top, windowTitle(w), Font.systemFont(12), C.sub, { minScale: 0.8 })
   top.addSpacer()
   addText(top, fmtPct(w.used_percent), Font.semiboldSystemFont(13), pctTextColor(w.used_percent, dim, C.text), { opacity: dim ? 0.55 : 1 })
 
@@ -1591,7 +1627,8 @@ function accountBlock(parent, acc, family, inner, offline) {
   return block
 }
 
-function filterAccounts(accounts, param) {
+function filterAccounts(all, param) {
+  const accounts = all.filter((a) => a.enabled !== false) // 위젯에서 숨긴 계정(앱이 쓴 캐시에 섞여 있을 수 있다)
   if (!param) return accounts
   const wanted = param.split(",").map((s) => s.trim()).filter(Boolean)
   if (!wanted.length) return accounts
@@ -1785,7 +1822,7 @@ async function checkAlerts(accounts) {
   const jobs = []
   const cancel = []
   for (const acc of accounts) {
-    const who = `${providerName(acc.provider)} · ${acc.label}`
+    const who = `${providerName(acc.provider)} (${acc.label})`
     if (acc.status === "needs_login") {
       if (on("login") && once(`login:${acc.id}:${acc.last_success_at}`))
         jobs.push({ id: `aiusage-login-${acc.id}`, title: who, body: t("notify.login.body") })
@@ -2091,7 +2128,7 @@ const HEAD_STYLE = {
 // 글자 크기가 달라도 밑줄(baseline)이 맞도록 y 를 잡았다.
 const LINE_STYLE = {
   card: { title: [13, 400], titleY: 2, pct: 15, time: 12, timeY: 3, barY: 23, barH: 7 },
-  detail: { title: [15, 500], titleY: 4, pct: 18, time: 13, timeY: 7, barY: 30, barH: 8 },
+  detail: { title: [15, 500], titleY: 2, pct: 18, time: 13, timeY: 4, barY: 30, barH: 8 },
 }
 
 // 카드·상세에 쓰는 글자들을 미리 잰다. style: "card" | "detail"
@@ -2464,7 +2501,12 @@ async function accountDetail(accountId) {
       const label = await prompt(t("common.name"), t("detail.namePrompt"), { value: acc.label })
       if (label) await patch({ label })
     }), { valueWidth: 55 }))
-    page.add(toggleRow(t("detail.showInWidget"), acc.enabled, page.run(() => patch({ enabled: !acc.enabled }))))
+    page.add(toggleRow(t("detail.showInWidget"), acc.enabled, page.run(() => patch({ enabled: !acc.enabled })), t("detail.showInWidgetDesc")))
+    const groups = windowGroups(usage)
+    if (acc.provider === "antigravity" && groups.length > 1) {
+      const cur = widgetGroupOf({ ...usage, id: accountId })
+      for (const g of groups) page.add(checkRow(t("detail.widgetGroup", { group: groupShort(g) }), g === cur, page.run(() => setWidgetGroup(accountId, g))))
+    }
     if (acc.provider === "claude") {
       page.add(valueRow("sessionKey", acc.auth.session_key ? t("common.saved") : t("common.none"), page.run(() =>
         sessionKeyPage(accountId, { hasKey: !!acc.auth.session_key, canDelete: !!acc.auth.oauth })
@@ -2584,11 +2626,11 @@ async function mainMenu() {
     let accounts = []
     const usage = {}
     try {
-      const [acc, u] = await Promise.all([api("GET", "/v1/accounts"), loadUsage(doRefresh)])
+      const [acc, u] = await Promise.all([api("GET", "/v1/accounts"), loadUsage(doRefresh, { all: true })])
       accounts = acc.accounts
       for (const a of u.data.accounts) usage[a.id] = a
       if (u.offline) page.add(noticeRow({ title: t("main.cached"), detail: u.error, color: C.warn }))
-      else await checkAlerts(u.data.accounts)
+      else await checkAlerts(u.data.accounts.filter((a) => a.enabled !== false)) // 알림은 위젯과 같은 계정만
     } catch (e) {
       page.add(noticeRow({ title: t(getConfig().device ? "common.loadFailed" : "main.serverFailed"), detail: e.message, color: C.bad }))
     }
@@ -2882,6 +2924,8 @@ const STRINGS = {
   "detail.refresh": ["지금 새로고침", "Refresh now", "今すぐ更新", "立即刷新"],
   "detail.namePrompt": ["위젯에 보일 이름이에요.", "The name shown in the widget.", "ウィジェットに表示する名前です。", "在小组件中显示的名称。"],
   "detail.showInWidget": ["위젯에 표시", "Show in widget", "ウィジェットに表示", "在小组件中显示"],
+  "detail.showInWidgetDesc": ["끄면 위젯과 알림에서만 빠져요", "Off hides it from widgets and notifications only", "オフにするとウィジェットと通知にだけ表示されません", "关闭后仅在小组件和通知中隐藏"],
+  "detail.widgetGroup": ["위젯에 {group} 보이기", "Show {group} in widget", "ウィジェットに {group} を表示", "小组件显示 {group}"],
   "detail.relogin": ["다시 로그인", "Sign in again", "再ログイン", "重新登录"],
   "detail.delete": ["계정 삭제", "Delete account", "アカウントを削除", "删除账号"],
   "detail.deleteConfirm": ["{name} 계정과 로그인 정보를 {where}에서 지울까요?", "Delete {name} and its sign-in data from {where}?",

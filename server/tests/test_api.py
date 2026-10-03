@@ -235,6 +235,13 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(entry["reset_credits"]["available"], 1)
         self.assertEqual(self.call("POST", "/v1/accounts", {"provider": "claude", "session_key": "bad"})[0], 400)
 
+        # 위젯에서 숨기면 기본 응답에서는 빠지고, 앱이 쓰는 ?all=1 에는 enabled=false 로 남는다
+        self.call("PATCH", f"/v1/accounts/{acc['id']}", {"enabled": False})
+        self.assertEqual(self.call("GET", "/v1/usage")[1]["accounts"], [])
+        hidden = self.call("GET", "/v1/usage?all=1")[1]["accounts"]
+        self.assertEqual([(a["id"], a["enabled"]) for a in hidden], [(acc["id"], False)])
+        self.assertEqual(hidden[0]["windows"][0]["used_percent"], 11)
+
 
 if __name__ == "__main__":
     unittest.main()

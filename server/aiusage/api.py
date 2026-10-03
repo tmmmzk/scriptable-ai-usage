@@ -29,8 +29,10 @@ Route = tuple[str, "re.Pattern[str]", Callable[..., Any]]
 def build_routes(svc: UsageService) -> list[Route]:
     def usage(q: dict, body: dict) -> Any:
         ids = [s for s in (q.get("accounts", [""])[0]).split(",") if s.strip()]
-        refresh = q.get("refresh", ["0"])[0] in ("1", "true", "yes")
-        return svc.usage_payload(ids or None, refresh=refresh)
+        def flag(name: str) -> bool:
+            return q.get(name, ["0"])[0] in ("1", "true", "yes")
+
+        return svc.usage_payload(ids or None, refresh=flag("refresh"), include_hidden=flag("all"))
 
     def list_accounts(q: dict, body: dict) -> Any:
         return {"accounts": [svc.public_account(a) for a in svc.store.list_accounts()]}

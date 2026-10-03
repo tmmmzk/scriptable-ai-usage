@@ -141,32 +141,43 @@ class CodexParserTest(unittest.TestCase):
 
 class AntigravityParserTest(unittest.TestCase):
     def test_summary(self):
+        # 실제 응답처럼 이름은 영어로 길게, 주간이 5시간보다 먼저 온다
         data = {
             "response": {
                 "groups": [
                     {
-                        "displayName": "Gemini Models",
+                        "displayName": "Gemini",
                         "buckets": [
-                            {"bucketId": "g5h", "displayName": "5시간", "remainingFraction": 0.8,
-                             "resetTime": "2026-10-03T05:00:00Z", "window": "FIVE_HOURS"},
-                            {"bucketId": "gwk", "displayName": "주간", "remaining": {"case": "remainingFraction", "value": 0.25},
-                             "window": "WEEKLY"},
+                            {"bucketId": "gwk", "displayName": "Weekly Limit Remaining",
+                             "remaining": {"case": "remainingFraction", "value": 0.25}},
+                            {"bucketId": "g5h", "displayName": "Five Hour Limit Remaining", "remainingFraction": 0.8,
+                             "resetTime": "2026-10-03T05:00:00Z", "window": "FIVE_HOUR"},
                             {"bucketId": "off", "disabled": True, "remainingFraction": 1},
                         ],
                     },
-                    {"displayName": "Claude and GPT models", "buckets": [{"id": "c5h", "remainingFraction": 1.0}]},
+                    {"displayName": "Claude/GPT", "buckets": [
+                        {"id": "cwk", "displayName": "Weekly Limit Remaining", "remainingFraction": 0.1},
+                        {"id": "c5h", "displayName": "Five Hour Limit Remaining", "remainingFraction": 1.0},
+                        {"id": "odd", "displayName": "Bonus Limit Remaining", "remainingFraction": 1.0},
+                    ]},
                 ]
             }
         }
-        ws = antigravity.parse_quota_summary(data)
-        self.assertEqual(len(ws), 3)
+        ws = antigravity.order_windows(antigravity.parse_quota_summary(data))
+        self.assertEqual([(w["group"], w["label"]) for w in ws],
+                         [("Gemini", "5시간"), ("Gemini", "주간"), ("Claude/GPT", "5시간"), ("Claude/GPT", "주간"), ("Claude/GPT", "Bonus")])
         self.assertEqual(ws[0]["used_percent"], 20.0)
         self.assertEqual(ws[0]["window_seconds"], 5 * 3600)
         self.assertEqual(ws[1]["used_percent"], 75.0)
         self.assertEqual(ws[1]["window_seconds"], 7 * 86400)
-        self.assertEqual(ws[2]["group"], "Claude and GPT models")
-        antigravity.mark_primary(ws)
-        self.assertEqual([w["primary"] for w in ws], [True, True, False])
+        # 대표 창은 사용률과 상관없이 첫 그룹의 5시간·주간 (Claude/GPT 주간이 90% 여도)
+        self.assertEqual([w["primary"] for w in ws], [True, True, False, False, False])
+
+    def test_plan(self):
+        # Google AI Pro 는 currentTier 가 free/standard 여도 paidTier 로 알 수 있다
+        self.assertEqual(antigravity.resolve_plan({"currentTier": {"id": "free-tier"}, "paidTier": {"id": "g1-pro-tier"}}, {}), "g1-pro-tier")
+        self.assertEqual(antigravity.resolve_plan({"currentTier": {"id": "standard-tier"}}, {}), "Paid")
+        self.assertEqual(antigravity.resolve_plan({"currentTier": {"id": "free-tier"}}, {}), "Free")
 
     def test_models_and_buckets(self):
         models = {"models": {"gemini-3-pro": {"displayName": "Gemini 3 Pro",

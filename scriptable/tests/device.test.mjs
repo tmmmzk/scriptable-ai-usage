@@ -94,13 +94,15 @@ function upstream(method, url, headers, raw) {
     return ok({ access_token: "g-at", refresh_token: "g-rt", expires_in: 3600, id_token: jwt({ email: "me@gmail.com" }) })
   }
   if (url === "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist")
-    return ok({ cloudaicompanionProject: { id: "proj-1" }, currentTier: { id: "standard-tier" } })
+    return ok({ cloudaicompanionProject: { id: "proj-1" }, currentTier: { id: "free-tier" }, paidTier: { id: "g1-pro-tier", name: "Gemini Code Assist in Google One AI Pro" } })
   if (url === "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary") {
     assert.equal(b.project, "proj-1")
     return ok({ response: { groups: [
-      { displayName: "Gemini Models", buckets: [{ bucketId: "g5", displayName: "5시간", remainingFraction: 0.4, window: "FIVE_HOURS", resetTime: "2099-01-01T00:00:00Z" },
-        { bucketId: "gw", displayName: "주간", remaining: { case: "remainingFraction", value: 0.9 }, window: "WEEKLY" }] },
-      { displayName: "Claude and GPT models", buckets: [{ id: "c5", displayName: "5시간", remainingFraction: 0.7 }] }] } })
+      // 실제 응답처럼 이름은 영어로 길게, 주간이 먼저
+      { displayName: "Gemini Models", buckets: [{ bucketId: "gw", displayName: "Weekly Limit Remaining", remaining: { case: "remainingFraction", value: 0.9 } },
+        { bucketId: "g5", displayName: "Five Hour Limit Remaining", remainingFraction: 0.4, window: "FIVE_HOUR", resetTime: "2099-01-01T00:00:00Z" }] },
+      { displayName: "Claude and GPT models", buckets: [{ id: "cw", displayName: "Weekly Limit Remaining", remainingFraction: 0.05 },
+        { id: "c5", displayName: "Five Hour Limit Remaining", remainingFraction: 0.7 }] }] } })
   }
   throw new Error(`unexpected ${method} ${url}`)
 }
@@ -119,7 +121,7 @@ const api = new Function(...Object.keys(env), body + `
   return { sha256, b64url, b64decode, utf8Bytes, utf8Decode, jwtClaims, pkcePair, parseCallbackInput, deviceApi,
     devGetCreds, devCredKey, getConfig, setMode, KC_AG_CLIENT, msOf, devRefreshCreds, claudeProvider,
     checkAlerts, saveNotifySettings, planLabel, resetText, claudeWindows, cleanUsage,
-    setLang, t, fmtDuration, windowTitle, statusText, serverApi, STRINGS, LANG_CODES }`)(...Object.values(env))
+    setLang, t, fmtDuration, windowTitle, statusText, serverApi, STRINGS, LANG_CODES, primaryWindows, setWidgetGroup }`)(...Object.values(env))
 
 let passed = 0
 const test = async (name, fn) => { await fn(); passed++; console.log("ok -", name) }
@@ -291,16 +293,27 @@ await test("Antigravity: Client 설정 → 로그인 → 프로젝트·그룹별
   assert.equal(params.access_type, "offline")
   const acc = await call("POST", `/v1/logins/${start.login_id}/complete`, { input: `http://127.0.0.1:8585/callback?code=g&state=${params.state}` })
   assert.equal(acc.email, "me@gmail.com")
-  assert.equal(acc.plan, "Paid")
+  assert.equal(acc.plan, "g1-pro-tier") // AI Pro 는 paidTier 로 온다
+  assert.equal(api.planLabel(acc.plan, "antigravity"), "AI Pro")
   assert.equal(api.devGetCreds(acc.id).project_id, "proj-1")
   const { usage } = await call("GET", `/v1/accounts/${acc.id}`)
-  assert.deepEqual(usage.windows.map((w) => [w.group, w.used_percent, w.primary]),
-    [["Gemini Models", 60, true], ["Gemini Models", 10, false], ["Claude and GPT models", 30, true]])
+  // 이름은 기간으로, 그룹 안에서는 5시간 → 주간. 대표 창은 사용률과 상관없이 첫 그룹(Gemini).
+  assert.deepEqual(usage.windows.map((w) => [api.windowTitle(w), w.used_percent, w.primary]),
+    [["Gemini 5시간", 60, true], ["Gemini 주간", 10, true], ["Claude/GPT 5시간", 30, false], ["Claude/GPT 주간", 95, false]])
+  // 위젯에 보일 그룹을 고르면 그 그룹의 5시간·주간
+  const entry = { ...usage, id: acc.id }
+  assert.deepEqual(api.primaryWindows(entry).map(api.windowTitle), ["Gemini 5시간", "Gemini 주간"])
+  api.setWidgetGroup(acc.id, "Claude and GPT models")
+  assert.deepEqual(api.primaryWindows(entry).map(api.windowTitle), ["Claude/GPT 5시간", "Claude/GPT 주간"])
 })
 
 await test("숨김·이름 변경·삭제(키체인·파일 정리)", async () => {
   await call("PATCH", `/v1/accounts/${codexId}`, { label: "회사", enabled: false })
   assert.ok(!(await call("GET", "/v1/usage")).accounts.some((a) => a.id === codexId))
+  // 앱은 ?all=1 로 숨긴 계정도 사용량과 함께 받는다(위젯에서만 숨김)
+  const hidden = (await call("GET", "/v1/usage?all=1")).accounts.find((a) => a.id === codexId)
+  assert.equal(hidden.enabled, false)
+  assert.ok(hidden.windows.length > 0)
   await call("DELETE", `/v1/accounts/${codexId}`)
   assert.ok(!(api.devCredKey(codexId) in kc))
   assert.ok(!Object.keys(files).some((f) => f.includes(codexId)))
@@ -352,7 +365,7 @@ await test("알림: 기준 초과·초기화 예약·재로그인·초기화권 
   assert.deepEqual(ids, ["aiusage-credit-a1-" + Date.parse(accounts[0].reset_credits.items[0].expires_at), "aiusage-high-a1-session",
     "aiusage-login-a2", "aiusage-reset-a1-session"].sort())
   const high = notifications.find((n) => n.id === "aiusage-high-a1-session")
-  assert.equal(high.title, "Codex · 회사")
+  assert.equal(high.title, "Codex (회사)")
   assert.match(high.body, /^5시간 사용량이 93%예요\. (2시간 5\d분|3시간) 후 초기화돼요\.$/)
   assert.equal(notifications.find((n) => n.id === "aiusage-reset-a1-session").at.toISOString(), new Date(soon).toISOString())
   // 다시 확인해도 같은 알림은 보내지 않는다
@@ -414,10 +427,10 @@ await test("언어: 모든 문구가 4개 언어로 있고, 시간·한도 이�
     api.setLang(lang)
     seen[lang] = [api.fmtDuration(at), api.resetText(at), api.windowTitle({ label: "현재 세션" }), api.windowTitle(w),
       api.windowTitle({ label: "5시간", group: "Gemini Models" }), api.statusText("needs_login"), api.t("pill.credits", { n: 1 }),
-      api.windowTitle({ label: "주간", group: "추가 한도" }, true)]
+      api.windowTitle({ label: "주간", group: "추가 한도" })]
   }
-  assert.deepEqual(seen.ko, ["2시간 12분", "2시간 12분 후 초기화", "현재 세션", "Fable 이번 주", "Gemini 5시간", "재로그인 필요", "초기화권 1", "추가"])
-  assert.deepEqual(seen.en, ["2h 12m", "Resets in 2h 12m", "Current session", "Fable this week", "Gemini 5h", "Sign-in needed", "1 reset", "Extra limit"])
+  assert.deepEqual(seen.ko, ["2시간 12분", "2시간 12분 후 초기화", "현재 세션", "Fable 이번 주", "Gemini 5시간", "재로그인 필요", "초기화권 1", "추가 한도 주간"])
+  assert.deepEqual(seen.en, ["2h 12m", "Resets in 2h 12m", "Current session", "Fable this week", "Gemini 5h", "Sign-in needed", "1 reset", "Extra limit Weekly"])
   assert.deepEqual(seen.ja.slice(0, 3), ["2時間12分", "2時間12分後にリセット", "現在のセッション"])
   assert.deepEqual(seen.zh.slice(0, 3), ["2小时12分钟", "2小时12分钟后重置", "当前会话"])
   assert.equal(api.t("pill.credits", { n: 3 }), "重置券 3")

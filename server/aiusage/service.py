@@ -63,6 +63,7 @@ class UsageService:
         return {
             **self._common(acc, snap),
             "plan": snap.get("plan") or acc.get("plan"),
+            "enabled": acc.get("enabled", True),
             "warnings": snap.get("warnings", []),
             "stale": snap.get("stale", False),
             "windows": provider.visible_windows(windows) if provider else windows,
@@ -120,8 +121,9 @@ class UsageService:
         futures = [self._pool.submit(self.refresh_account, aid) for aid in account_ids]
         wait(futures, timeout=timeout)
 
-    def usage_payload(self, ids: Optional[list[str]] = None, refresh: bool = False) -> dict:
-        accounts = [a for a in self.store.list_accounts() if a.get("enabled", True)]
+    def usage_payload(self, ids: Optional[list[str]] = None, refresh: bool = False, include_hidden: bool = False) -> dict:
+        """위젯에서 숨긴 계정(enabled=False)은 빼고 준다. 앱은 include_hidden 으로 모두 받는다."""
+        accounts = [a for a in self.store.list_accounts() if include_hidden or a.get("enabled", True)]
         if ids:
             wanted = set(ids)
             accounts = [a for a in accounts if a["id"] in wanted or (a.get("label") or "") in wanted]
@@ -137,7 +139,8 @@ class UsageService:
     def start_poller(self) -> None:
         def loop() -> None:
             while not self._stop.is_set():
-                ids = [a["id"] for a in self.store.list_accounts() if a.get("enabled", True)]
+                # 위젯에서 숨긴 계정도 앱에서는 보이므로 같이 조회한다
+                ids = [a["id"] for a in self.store.list_accounts()]
                 self.refresh_many(ids, timeout=120)
                 self._expire_logins()
                 self._stop.wait(self.cfg.poll_interval)

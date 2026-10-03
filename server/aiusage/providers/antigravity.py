@@ -15,7 +15,7 @@ from typing import Any, Optional
 from .. import http
 from ..config import Config
 from ..errors import AuthError, LoginError, ProviderError
-from ..util import clamp_pct, iso, jwt_claims, now, parse_iso, to_float
+from ..util import clamp_pct, iso, jwt_claims, now, parse_iso, to_float, window_label
 from .base import LoginResult, LoginStart, Provider, SaveCreds, Usage, check_state, make_window, parse_callback_input
 
 AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
@@ -197,7 +197,7 @@ class AntigravityProvider(Provider):
                 usage.windows = parse_available_models(self._post("fetchAvailableModels", token, body))
             except ProviderError:
                 usage.windows = parse_quota_buckets(self._post("retrieveUserQuota", token, body))
-        mark_primary(usage.windows)
+        usage.windows = order_windows(usage.windows)
         return usage
 
 
@@ -228,6 +228,10 @@ def resolve_plan(info: dict, creds: dict) -> Optional[str]:
     plan = (info.get("planInfo") or {}).get("planType")
     if plan:
         return plan
+    # Google AI Pro/Ultra 구독은 currentTier 가 free/standard 여도 paidTier 에 g1-pro-tier 처럼 온다
+    paid = (info.get("paidTier") or {}).get("id")
+    if paid:
+        return paid
     tier = (info.get("currentTier") or {}).get("id")
     hosted = jwt_claims(creds.get("id_token")).get("hd")
     return {
@@ -246,11 +250,16 @@ def _slug(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_") or "q"
 
 
+_HOUR_WORDS = {"ONE": 1, "TWO": 2, "THREE": 3, "FOUR": 4, "FIVE": 5, "SIX": 6, "EIGHT": 8, "TWELVE": 12}
+
+
 def _window_seconds(window: Any) -> Optional[int]:
+    """"FIVE_HOUR", "5h", "Five Hour Limit Remaining", "WEEKLY" 등 → 초."""
     w = str(window or "").upper()
     if "HOUR" in w:
         m = re.search(r"(\d+)", w)
-        return int(m.group(1)) * 3600 if m else 5 * 3600
+        word = next((k for k in _HOUR_WORDS if k in w), None)
+        return (int(m.group(1)) if m else _HOUR_WORDS[word] if word else 5) * 3600
     if "WEEK" in w:
         return 7 * 86400
     if "DAY" in w:
@@ -277,13 +286,17 @@ def parse_quota_summary(data: Any) -> list[dict]:
                 remaining = rem.get("remainingFraction")
                 if remaining is None and rem.get("case") == "remainingFraction":
                     remaining = rem.get("value")
+            # 이름은 'Weekly Limit Remaining' 처럼 길게 오므로, 기간을 알면 Claude·Codex 처럼 5시간·주간으로 쓴다
+            name = bucket.get("displayName") or bucket.get("name") or bid
+            seconds = _window_seconds(bucket.get("window") or name)
+            label = window_label(seconds) if seconds else (re.sub(r"\s*(limit\s*)?remaining\s*$", "", name, flags=re.I) or name)
             windows.append(
                 make_window(
                     f"{_slug(gname)}:{bid}",
-                    bucket.get("displayName") or bucket.get("name") or bid,
+                    label,
                     _used_from_remaining(remaining),
                     iso(parse_iso(bucket.get("resetTime"))),
-                    window_seconds=_window_seconds(bucket.get("window")),
+                    window_seconds=seconds,
                     group=gname,
                 )
             )
@@ -330,12 +343,15 @@ def parse_quota_buckets(data: Any) -> list[dict]:
     ]
 
 
-def mark_primary(windows: list[dict], limit: int = 2) -> None:
-    """작은 위젯에 보여줄 대표 창: 사용률이 가장 높은 것부터 limit 개."""
-    ranked = sorted(
-        (w for w in windows if w["used_percent"] is not None),
-        key=lambda w: w["used_percent"],
-        reverse=True,
-    )
-    for w in ranked[:limit]:
+def order_windows(windows: list[dict], limit: int = 2) -> list[dict]:
+    """그룹 순서는 그대로, 그룹 안에서는 짧은 기간부터(5시간 → 주간).
+    작은 위젯에 보여줄 대표 창은 첫 그룹(보통 Gemini)의 앞 limit 개."""
+    groups = list(dict.fromkeys(w["group"] for w in windows))
+    out = [
+        w
+        for g in groups
+        for w in sorted((w for w in windows if w["group"] == g), key=lambda w: w["window_seconds"] or float("inf"))
+    ]
+    for w in [w for w in out if w["group"] == groups[0]][:limit] if groups else []:
         w["primary"] = True
+    return out

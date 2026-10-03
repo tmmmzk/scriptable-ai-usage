@@ -30,7 +30,7 @@ Claude, Codex, Google Antigravity 구독 사용량과 **초기화권**을 iPhone
 |---|---|---|---|
 | Claude | 현재 세션 / 이번 주 / 모델별 이번 주, 추가 사용량, 플랜 | ✅ (sessionKey 필요) | OAuth 로그인, sessionKey |
 | Codex | 5시간 / 주간 / 모델별 추가 한도, 크레딧, 플랜(Plus·Pro·Business 등) | ✅ | OAuth 로그인 |
-| Antigravity | 그룹별(Gemini / Claude·GPT) 5시간·주간 | – | Google OAuth 로그인 |
+| Antigravity | 그룹별(Gemini / Claude·GPT) 5시간·주간, 플랜(Free·AI Pro·AI Ultra 등) | – | Google OAuth 로그인 |
 
 ## 기기 모드 (서버 없이)
 
@@ -109,6 +109,8 @@ Antigravity 의 Google OAuth 클라이언트 ID/Secret 은 앱 안에 들어 있
 
 - **메인**: 계정마다 카드 하나. 앱은 공간이 넓어서 한도(현재 세션·이번 주·Fable 이번 주 등)를 모두 한 줄씩 가로 전체로 보여주고, 남은 시간은 퍼센트 바로 옆에 붙습니다. 카드를 누르면 계정 화면으로 갑니다.
 - **계정 화면**: 한도별 남은 시간과 초기화 날짜·시각(요일 포함), 초기화권 한 장씩, 추가 사용량. 아래에서 새로고침·이름·위젯에 표시·sessionKey·다시 로그인·삭제를 합니다.
+  - **위젯에 표시**를 끄면 위젯과 알림에서만 빠지고, 앱에서는 '숨김' 배지와 함께 사용량이 계속 보입니다.
+  - Antigravity 는 위젯에 보일 그룹(Gemini 또는 Claude/GPT)을 고를 수 있습니다. 기본은 Gemini 의 5시간·주간입니다.
 - **설정**: 연결 방식(이 iPhone / 내 서버), Antigravity 로그인 설정, 알림, 위젯 미리보기, 언어, Claude 로고.
 
 ### 언어
