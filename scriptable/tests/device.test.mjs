@@ -144,7 +144,7 @@ const api = new Function(...Object.keys(env), body + `
     devGetCreds, devCredKey, getConfig, setMode, KC_AG_CLIENT, msOf, devRefreshCreds, claudeProvider,
     checkAlerts, saveNotifySettings, planLabel, timeCandidates, claudeWindows, cleanUsage, money, shownPct, setShowLeft,
     setLang, t, fmtDuration, windowTitle, statusText, serverApi, STRINGS, LANG_CODES, primaryWindows, setWidgetGroup,
-    isNewer, checkUpdate, installUpdate, restoreBackup, backupVersion, VERSION, notifyUpdate }`)(...Object.values(env))
+    isNewer, checkUpdate, installUpdate, restoreBackup, backupVersion, VERSION, notifyUpdate, assignCodes, filterAccounts }`)(...Object.values(env))
 
 let passed = 0
 const test = async (name, fn) => { await fn(); passed++; console.log("ok -", name) }
@@ -366,6 +366,28 @@ await test("Antigravity: Client 설정 → 로그인 → 프로젝트·그룹별
   assert.deepEqual(only.windows.map((w) => w.used_percent), [60, 10, 30, 95])
   assert.deepEqual(only.warnings, [])
   up.agDaily = null
+})
+
+await test("계정 번호(4자리): 겹치지 않고 그대로 유지, 위젯 Parameter·순서 바꾸기", async () => {
+  const { accounts } = await call("GET", "/v1/accounts")
+  const codes = accounts.map((a) => a.code)
+  assert.ok(codes.every((c) => /^\d{4}$/.test(c)))
+  assert.equal(new Set(codes).size, codes.length)
+  assert.deepEqual((await call("GET", "/v1/accounts")).accounts.map((a) => a.code), codes)
+  // 겹치면 다음 번호
+  const one = [{ id: "x" }]
+  api.assignCodes(one)
+  const taken = [{ id: "y", code: one[0].code }, { id: "x" }]
+  api.assignCodes(taken)
+  assert.equal(taken[1].code, one[0].code === "9999" ? "1000" : String(Number(one[0].code) + 1))
+  // Parameter 는 번호·이름 모두, 적은 순서대로
+  const usage = (await call("GET", "/v1/usage")).accounts
+  assert.deepEqual(api.filterAccounts(usage, `${usage[1].code}, ${usage[0].label}`).map((a) => a.id), [usage[1].id, usage[0].id])
+  // 순서 바꾸기: 마지막 계정을 맨 위로
+  const last = accounts[accounts.length - 1]
+  await call("PATCH", `/v1/accounts/${last.id}`, { order: 0 })
+  assert.equal((await call("GET", "/v1/accounts")).accounts[0].id, last.id)
+  assert.equal((await call("GET", "/v1/usage")).accounts[0].id, last.id)
 })
 
 await test("숨김·이름 변경·삭제(키체인·파일 정리)", async () => {

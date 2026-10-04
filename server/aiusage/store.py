@@ -10,6 +10,26 @@ from typing import Any, Callable, Optional
 from .util import iso, now
 
 
+def assign_codes(accounts: list[dict]) -> bool:
+    """위젯 Parameter 에 쓰는 계정 번호(4자리). id 로 정하고 겹치면 다음 번호.
+    한 번 정하면 저장해 두어 바뀌지 않는다. 번호를 새로 붙였으면 True."""
+    used = {a["code"] for a in accounts if a.get("code")}
+    changed = False
+    for acc in accounts:
+        if acc.get("code"):
+            continue
+        h = 0
+        for ch in acc["id"]:
+            h = (h * 31 + ord(ch)) & 0xFFFFFFFF
+        n = 1000 + h % 9000
+        while str(n) in used:
+            n = 1000 if n == 9999 else n + 1
+        acc["code"] = str(n)
+        used.add(acc["code"])
+        changed = True
+    return changed
+
+
 class Store:
     """계정(자격증명 포함)과 마지막 스냅샷을 JSON 파일로 저장한다.
 
@@ -23,6 +43,8 @@ class Store:
         self._lock = threading.RLock()
         self._accounts: dict[str, dict] = self._read(self._accounts_path, {})
         self._snapshots: dict[str, dict] = self._read(self._snapshots_path, {})
+        if assign_codes(self._ordered()):  # 번호가 없던 예전 계정
+            self._write(self._accounts_path, self._accounts)
 
     # ---- 파일 I/O ----
     @staticmethod
@@ -44,6 +66,9 @@ class Store:
         os.replace(tmp, path)
 
     # ---- 계정 ----
+    def _ordered(self) -> list[dict]:
+        return sorted(self._accounts.values(), key=lambda a: (a.get("order", 0), a.get("created_at", "")))
+
     def list_accounts(self) -> list[dict]:
         with self._lock:
             accounts = [copy.deepcopy(a) for a in self._accounts.values()]
@@ -79,6 +104,7 @@ class Store:
                 "creds": creds,
             }
             self._accounts[account_id] = acc
+            assign_codes(self._ordered())
             self._write(self._accounts_path, self._accounts)
             return copy.deepcopy(acc)
 

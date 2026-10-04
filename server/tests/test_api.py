@@ -244,6 +244,12 @@ class ApiTest(unittest.TestCase):
         status, listing = self.call("GET", "/v1/accounts")
         self.assertEqual(len(listing["accounts"]), 1)
 
+        # 위젯 Parameter 용 4자리 번호: 목록·사용량에 있고, 번호로도 고를 수 있다
+        code = listing["accounts"][0]["code"]
+        self.assertRegex(code, r"^\d{4}$")
+        self.assertEqual(self.stored()[acc["id"]]["code"], code)
+        self.assertEqual([a["id"] for a in self.call("GET", f"/v1/usage?accounts={code}")[1]["accounts"]], [acc["id"]])
+
         status, _ = self.call("PATCH", f"/v1/accounts/{acc['id']}", {"label": "회사", "enabled": False})
         status, usage = self.call("GET", "/v1/usage")
         self.assertEqual(usage["accounts"], [])

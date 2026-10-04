@@ -226,5 +226,25 @@ class CallbackInputTest(unittest.TestCase):
             parse_callback_input("")
 
 
+
+class StoreTest(unittest.TestCase):
+    def test_codes_for_existing_accounts(self):
+        # 번호가 없던 예전 계정에도 처음 열 때 붙이고 저장한다(이미 있는 번호는 그대로)
+        import json
+        import tempfile
+
+        from aiusage.store import Store
+
+        with tempfile.TemporaryDirectory() as d:
+            with open(f"{d}/accounts.json", "w") as fh:
+                json.dump({"a": {"id": "a", "provider": "codex", "order": 1},
+                           "b": {"id": "b", "provider": "codex", "order": 2, "code": "1097"}}, fh)
+            codes = [a["code"] for a in Store(d).list_accounts()]
+            self.assertEqual(codes[1], "1097")
+            self.assertRegex(codes[0], r"^\d{4}$")
+            self.assertNotEqual(codes[0], "1097")
+            self.assertEqual([a["code"] for a in Store(d).list_accounts()], codes)
+
+
 if __name__ == "__main__":
     unittest.main()

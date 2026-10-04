@@ -34,6 +34,7 @@ class UsageService:
         provider = providers.get(acc["provider"])
         return {
             "id": acc["id"],
+            "code": acc.get("code"),
             "provider": acc["provider"],
             "provider_name": provider.name if provider else acc["provider"],
             "label": acc.get("label"),
@@ -126,7 +127,7 @@ class UsageService:
         accounts = [a for a in self.store.list_accounts() if include_hidden or a.get("enabled", True)]
         if ids:
             wanted = set(ids)
-            accounts = [a for a in accounts if a["id"] in wanted or (a.get("label") or "") in wanted]
+            accounts = [a for a in accounts if wanted & {a["id"], a.get("code"), a.get("label") or ""}]
         if refresh:
             self.refresh_many([a["id"] for a in accounts])
         return {

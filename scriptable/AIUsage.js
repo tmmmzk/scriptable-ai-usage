@@ -7,9 +7,9 @@
 //
 // • 두 가지 방식: 서버 모드(직접 띄운 서버가 수집) / 기기 모드(서버 없이 이 스크립트가 직접 조회)
 // • 앱에서 실행하면 설정·계정 관리 화면이 열립니다.
-// • 위젯 Parameter 에 계정 이름(또는 id)을 쉼표로 적으면 그 계정만 표시합니다. 예) 개인,회사
+// • 위젯 Parameter 에 계정 번호(앱의 계정 화면에 있는 4자리)나 이름을 쉼표로 적으면 그 계정만 그 순서로 표시합니다. 예) 4821,회사
 
-const VERSION = "0.7.3"
+const VERSION = "0.8.0"
 // 앱의 '업데이트'가 새 버전을 받아오는 주소(공개 저장소의 raw 파일). 포크했다면 여기를 바꾸세요.
 const UPDATE_URL = "https://raw.githubusercontent.com/tmmmzk/scriptable-ai-usage/main/scriptable/AIUsage.js"
 const KC_SERVER = "aiusage.server"
@@ -1045,7 +1045,28 @@ function readJSON(name, fallback) {
 }
 
 const writeJSON = (name, data) => fm.writeString(devPath(name), JSON.stringify(data))
-const devAccounts = () => readJSON("aiusage-device-accounts.json", []).sort((a, b) => (a.order || 0) - (b.order || 0))
+// 위젯 Parameter 에 쓰는 계정 번호(4자리). id 로 정하고 겹치면 다음 번호. 한 번 정하면 저장해 두어 바뀌지 않는다.
+function assignCodes(list) {
+  const used = new Set(list.map((a) => a.code).filter(Boolean))
+  let changed = false
+  for (const a of list) {
+    if (a.code) continue
+    let h = 0
+    for (const ch of a.id) h = (h * 31 + ch.charCodeAt(0)) >>> 0
+    let n = 1000 + (h % 9000)
+    while (used.has(String(n))) n = n === 9999 ? 1000 : n + 1
+    a.code = String(n)
+    used.add(a.code)
+    changed = true
+  }
+  return changed
+}
+
+function devAccounts() {
+  const list = readJSON("aiusage-device-accounts.json", []).sort((a, b) => (a.order || 0) - (b.order || 0))
+  if (assignCodes(list)) devSaveAccounts(list) // 번호가 없던 예전 계정
+  return list
+}
 const devSaveAccounts = (list) => writeJSON("aiusage-device-accounts.json", list)
 // 사용량은 계정마다 파일을 나눠, 여러 위젯이 동시에 써도 서로 덮어쓰지 않게 한다
 const devSnapName = (id) => `aiusage-device-snap-${id}.json`
@@ -1142,7 +1163,7 @@ async function devRefreshAccount(acc, minAgeMs) {
 
 function devCommon(acc, snap) {
   return {
-    id: acc.id, provider: acc.provider, provider_name: providerName(acc.provider), label: acc.label,
+    id: acc.id, code: acc.code || null, provider: acc.provider, provider_name: providerName(acc.provider), label: acc.label,
     email: acc.email || snap.email || null, status: snap.status || "pending", error: snap.error || null,
     fetched_at: snap.fetched_at || null, last_success_at: snap.last_success_at || null,
     plan: snap.plan || acc.plan || null,
@@ -1181,6 +1202,7 @@ function devUpsert(provider, accountId, label, result) {
       order: Math.max(0, ...list.map((a) => a.order || 0)) + 1, created_at: isoOf(Date.now()),
     }
     list.push(acc)
+    assignCodes(list)
     devSaveCreds(acc.id, result.creds)
   }
   devSaveAccounts(list)
@@ -1281,6 +1303,7 @@ async function deviceApi(method, path, body) {
       const acc = devUpdateAccount(id, (a) => {
         if (body.label && String(body.label).trim()) a.label = String(body.label).trim()
         if ("enabled" in body) a.enabled = !!body.enabled
+        if (typeof body.order === "number") a.order = body.order
       })
       if (sessionKey != null) await devRefreshAccount(acc, 0)
       return devPublic(acc)
@@ -1703,7 +1726,7 @@ function filterAccounts(all, param) {
   const wanted = param.split(",").map((s) => s.trim()).filter(Boolean)
   if (!wanted.length) return accounts
   return wanted
-    .map((w) => accounts.find((a) => a.id === w || a.label === w))
+    .map((w) => accounts.find((a) => a.code === w) || accounts.find((a) => a.id === w || a.label === w))
     .filter(Boolean)
 }
 
@@ -2034,6 +2057,15 @@ async function confirm(title, message, okText = t("common.ok"), destructive = fa
   return (await a.presentAlert()) === 0
 }
 
+// 아래에서 올라오는 선택지. 고른 번호, 취소하면 -1.
+async function choose(title, options) {
+  const a = new Alert()
+  a.title = title
+  for (const o of options) a.addAction(o)
+  a.addCancelAction(t("common.cancel"))
+  return a.presentSheet()
+}
+
 // 글자를 직접 받을 때만 쓰는 작은 입력창. 취소하면 null.
 async function prompt(title, message, { placeholder = "", value = "", secure = false } = {}) {
   const a = new Alert()
@@ -2221,19 +2253,21 @@ function imageRow(img, height) {
 }
 
 // 서비스 고르기 한 줄: 로고 · 이름(+설명) · ›
-function providerRow(provider, title, subtitle, onSelect) {
+function providerRow(provider, title, subtitle, onSelect, { chevron = true } = {}) {
   const r = new UITableRow()
   r.dismissOnSelect = !!(onSelect && onSelect.dismiss)
   r.height = subtitle ? 62 : 52
   const img = providerRowLogo(provider)
   if (img) r.addImage(img).widthWeight = 10
   const c = r.addText(title, subtitle || null)
-  c.widthWeight = 82
+  c.widthWeight = chevron ? 82 : 90
   c.subtitleColor = Color.gray()
-  const v = r.addText("›")
-  v.widthWeight = 8
-  v.rightAligned()
-  v.titleColor = Color.gray()
+  if (chevron) {
+    const v = r.addText("›")
+    v.widthWeight = 8
+    v.rightAligned()
+    v.titleColor = Color.gray()
+  }
   r.onSelect = onSelect
   return r
 }
@@ -2709,6 +2743,12 @@ async function accountDetail(accountId) {
       const label = await prompt(t("common.name"), null, { value: acc.label })
       if (label) await patch({ label })
     }), { valueWidth: 55 }))
+    if (acc.code) {
+      page.add(valueRow(t("detail.code"), acc.code, page.run(() => {
+        Pasteboard.copy(acc.code)
+        page.ok(t("common.copied"), acc.code)
+      }), { subtitle: t("detail.codeDesc"), valueWidth: 30 }))
+    }
     page.add(toggleRow(t("detail.showInWidget"), acc.enabled, page.run(() => patch({ enabled: !acc.enabled }))))
     const groups = windowGroups(usage)
     if (acc.provider === "antigravity" && groups.length > 1) {
@@ -2735,6 +2775,26 @@ async function accountDetail(accountId) {
       await api("DELETE", `/v1/accounts/${accountId}`)
       return { deleted: acc.label }
     }), C.bad))
+  })
+}
+
+// ───────────────────────── 앱 UI: 계정 순서 ─────────────────────────
+// 메인·위젯에 보일 순서. 계정을 누르고 옮길 곳을 고른다.
+async function reorderPage() {
+  await openPage(t("reorder.title"), async (page) => {
+    const { accounts } = await api("GET", "/v1/accounts")
+    accounts.forEach((acc, i) => {
+      page.add(providerRow(acc.provider, acc.label, acc.email || acc.provider_name, page.run(async () => {
+        const seen = new Set([i])
+        const moves = [["reorder.up", i - 1], ["reorder.down", i + 1], ["reorder.top", 0], ["reorder.bottom", accounts.length - 1]]
+          .filter(([, to]) => to >= 0 && to < accounts.length && !seen.has(to) && seen.add(to))
+        const pick = await choose(acc.label, moves.map(([key]) => t(key)))
+        if (!moves[pick]) return // 취소
+        const next = accounts.filter((a) => a !== acc)
+        next.splice(moves[pick][1], 0, acc)
+        for (const [j, a] of next.entries()) if (a.order !== j + 1) await api("PATCH", `/v1/accounts/${a.id}`, { order: j + 1 })
+      }), { chevron: false }))
+    })
   })
 }
 
@@ -2919,6 +2979,7 @@ async function mainMenu() {
       const acc = await addAccountPage()
       if (acc) page.ok(t("add.done"), loginDetail(acc))
     })))
+    if (accounts.length > 1) page.add(linkRow(t("reorder.title"), page.run(reorderPage)))
     page.add(actionRow(t("main.refreshAll"), page.run(() => (refresh = true)), ACCENT))
     page.add(linkRow(t("settings.title"), page.run(settingsPage)))
   })
@@ -3001,6 +3062,7 @@ const STRINGS = {
   "common.noData": ["데이터 없음", "No data", "データなし", "暂无数据"],
   "common.didSave": ["저장했어요", "Saved", "保存しました", "已保存"],
   "common.didDelete": ["삭제했어요", "Deleted", "削除しました", "已删除"],
+  "common.copied": ["복사했어요", "Copied", "コピーしました", "已复制"],
 
   // 상태
   "status.ok": ["정상", "OK", "正常", "正常"],
@@ -3154,6 +3216,14 @@ const STRINGS = {
   "detail.refresh": ["지금 새로고침", "Refresh now", "今すぐ更新", "立即刷新"],
   "detail.showInWidget": ["위젯에 표시", "Show in widget", "ウィジェットに表示", "在小组件中显示"],
   "detail.widgetModel": ["위젯에 보일 모델", "Widget shows", "ウィジェットに表示", "小组件显示"],
+  "detail.code": ["계정 번호", "Account number", "アカウント番号", "账号编号"],
+  "detail.codeDesc": ["위젯 Parameter에 적으면 이 계정만 보여요", "Put it in the widget Parameter to show only this account",
+    "ウィジェットの Parameter に入れるとこのアカウントだけ表示", "填入小组件 Parameter 后只显示此账号"],
+  "reorder.title": ["순서 바꾸기", "Reorder", "並べ替え", "调整顺序"],
+  "reorder.up": ["위로", "Move up", "上へ", "上移"],
+  "reorder.down": ["아래로", "Move down", "下へ", "下移"],
+  "reorder.top": ["맨 위로", "Move to top", "一番上へ", "移到最上"],
+  "reorder.bottom": ["맨 아래로", "Move to bottom", "一番下へ", "移到最下"],
   "detail.relogin": ["다시 로그인", "Sign in again", "再ログイン", "重新登录"],
   "detail.delete": ["계정 삭제", "Delete account", "アカウントを削除", "删除账号"],
   "detail.deleteConfirm": ["{name} 계정과 로그인 정보를 {where}에서 지울까요?", "Delete {name} and its sign-in data from {where}?",
